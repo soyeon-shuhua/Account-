@@ -1,0 +1,423 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <!-- 設定 viewport 確保手機版型正確 -->
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>雲端記帳本 (Firebase 版本)</title>
+    <!-- 引入 Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- 引入 Inter 字體 -->
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap" rel="stylesheet">
+    <style>
+        body {
+            font-family: 'Inter', 'Microsoft JhengHei', 'sans-serif';
+            background-color: #f0f4f8; /* 柔和的淺藍灰背景 */
+        }
+        .card {
+            box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -2px rgba(0, 0, 0, 0.05);
+        }
+        .text-income { color: #10b981; } /* Emerald Green */
+        .text-expense { color: #ef4444; } /* Red */
+    </style>
+</head>
+<body>
+
+    <div id="app" class="max-w-md mx-auto p-4 sm:p-6 bg-white min-h-screen">
+        <header class="text-center mb-6 pt-4">
+            <h1 class="text-3xl font-extrabold text-gray-900">雲端記帳本</h1>
+            <p id="user-id-display" class="text-xs text-gray-500 mt-1">
+                <!-- 顯示使用者 ID 以確保連線成功 -->
+            </p>
+        </header>
+
+        <!-- 訊息彈窗: 用於取代 alert/confirm -->
+        <div id="message-box" class="fixed top-0 left-1/2 -translate-x-1/2 w-11/12 max-w-sm z-50"></div>
+
+        <!-- 總結數據區塊 -->
+        <div id="summary-section" class="mb-6 grid grid-cols-3 gap-3">
+            <!-- 總收入卡片 -->
+            <div class="card bg-white p-3 rounded-xl text-center border-l-4 border-emerald-500">
+                <p class="text-xs text-gray-500 font-semibold">總收入</p>
+                <p id="total-income" class="text-income text-lg font-bold mt-1">NT$ 0</p>
+            </div>
+            <!-- 總支出卡片 -->
+            <div class="card bg-white p-3 rounded-xl text-center border-l-4 border-red-500">
+                <p class="text-xs text-gray-500 font-semibold">總支出</p>
+                <p id="total-expense" class="text-expense text-lg font-bold mt-1">NT$ 0</p>
+            </div>
+            <!-- 淨餘額卡片 -->
+            <div id="net-balance-card" class="card p-3 rounded-xl text-white text-center transition duration-300 bg-gray-500">
+                <p class="text-xs font-semibold">淨餘額</p>
+                <p id="net-balance" class="text-lg font-bold mt-1">NT$ 0</p>
+            </div>
+        </div>
+
+        <!-- 新增交易區塊 -->
+        <section class="mb-8 p-5 bg-white rounded-2xl card border-t-8 border-orange-500">
+            <h2 class="text-xl font-semibold mb-4 text-gray-700">新增交易</h2>
+            <div class="space-y-4">
+                <!-- 類型選擇 (支出/收入) -->
+                <div>
+                    <label for="transaction-type" class="block text-sm font-medium text-gray-600 mb-1">類型</label>
+                    <select id="transaction-type" class="w-full p-3 border border-gray-300 rounded-lg focus:ring-orange-500 focus:border-orange-500 transition duration-150">
+                        <option value="expense">支出 (Expense)</option>
+                        <option value="income">收入 (Income)</option>
+                    </select>
+                </div>
+
+                <!-- 描述 -->
+                <div>
+                    <label for="transaction-description" class="block text-sm font-medium text-gray-600 mb-1">描述 (例如: 午餐, 加班費)</label>
+                    <!-- **關鍵 APK 修正:** 加入 onclick 屬性以協助 WebView 觸發鍵盤 -->
+                    <input type="text" id="transaction-description" placeholder="輸入描述" class="w-full p-3 border border-gray-300 rounded-lg focus:ring-orange-500 focus:border-orange-500 transition duration-150" required onclick="this.focus()">
+                </div>
+
+                <!-- 金額 -->
+                <div>
+                    <label for="transaction-amount" class="block text-sm font-medium text-gray-600 mb-1">金額 (NT$)</label>
+                     <!-- **關鍵 APK 修正:** 加入 onclick 屬性以協助 WebView 觸發鍵盤 -->
+                    <input type="number" id="transaction-amount" placeholder="輸入金額 (例如: 150)" class="w-full p-3 border border-gray-300 rounded-lg focus:ring-orange-500 focus:border-orange-500 transition duration-150" required onclick="this.focus()">
+                </div>
+
+                <!-- 確認新增按鈕 -->
+                <button onclick="addTransaction()" id="add-button" class="w-full bg-orange-500 hover:bg-orange-600 text-white font-bold py-3 rounded-lg transition duration-300 transform hover:scale-[1.01] shadow-lg shadow-orange-300">
+                    確認新增
+                </button>
+            </div>
+        </section>
+
+        <!-- 歷史記錄區塊 -->
+        <section class="p-5 bg-white rounded-2xl card">
+            <h2 class="text-xl font-semibold mb-4 text-gray-700">歷史記錄</h2>
+            <div id="history-list" class="space-y-3">
+                <p id="loading-message" class="text-center text-gray-500 py-4">連線中，請稍候...</p>
+                <!-- 交易項目將即時載入於此 -->
+            </div>
+        </section>
+
+        <!-- 空資料狀態顯示 -->
+        <div id="empty-state" class="text-center p-6 bg-gray-100 rounded-lg hidden mt-4">
+            <p class="text-gray-500 text-sm">暫無交易記錄。您的資料將儲存在雲端，請放心新增！</p>
+        </div>
+    </div>
+
+    <!-- Firebase 腳本及應用程式邏輯 -->
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { 
+            getFirestore, 
+            doc, 
+            addDoc, 
+            deleteDoc, 
+            onSnapshot, 
+            collection, 
+            query, 
+            serverTimestamp, 
+            setLogLevel 
+        } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        // --- 1. 環境變數設定 (來自 Canvas 環境) ---
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+        const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {};
+        const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+
+        // 全域變數
+        window.db = null;
+        window.auth = null;
+        window.userId = null;
+        
+        // 匯出函式到 window 物件，讓 HTML 可以呼叫
+        window.addTransaction = addTransaction;
+        window.deleteTransaction = deleteTransaction;
+
+        // --- 2. 輔助/通用函式 ---
+
+        /**
+         * 顯示浮動訊息 (取代 alert/confirm)。
+         * @param {string} message - 訊息內容。
+         * @param {'success'|'error'|'warning'} type - 訊息類型。
+         */
+        function showMessage(message, type) {
+            const box = document.getElementById('message-box');
+            const colorMap = {
+                success: 'bg-emerald-500',
+                error: 'bg-red-500',
+                warning: 'bg-amber-500'
+            };
+            
+            const alertHtml = `
+                <div class="${colorMap[type]} text-white p-3 mt-4 rounded-lg shadow-xl transition-all duration-300 ease-in-out transform scale-100 opacity-100 font-medium">
+                    ${message}
+                </div>
+            `;
+            
+            box.innerHTML = alertHtml;
+            
+            setTimeout(() => {
+                const element = box.querySelector('div');
+                if (element) {
+                    element.classList.remove('scale-100', 'opacity-100');
+                    element.classList.add('scale-95', 'opacity-0');
+                    setTimeout(() => box.innerHTML = '', 300);
+                }
+            }, 3000);
+        }
+
+        /**
+         * 格式化金額為 NT$ 格式。
+         */
+        function fmtMoney(amount) {
+            return `NT$ ${Math.abs(amount).toLocaleString('zh-TW', { minimumFractionDigits: 0, maximumFractionDigits: 2 })}`;
+        }
+
+        /**
+         * 格式化日期為月/日 時:分。
+         */
+        function formatDate(date) {
+            const month = (date.getMonth() + 1).toString().padStart(2, '0');
+            const day = date.getDate().toString().padStart(2, '0');
+            const hours = date.getHours().toString().padStart(2, '0');
+            const minutes = date.getMinutes().toString().padStart(2, '0');
+            return `${month}/${day} ${hours}:${minutes}`;
+        }
+
+        // --- 3. Firebase 核心設定與驗證 ---
+
+        /**
+         * 初始化 Firebase 並進行使用者驗證。
+         */
+        async function setupFirebase() {
+            setLogLevel('debug'); // 開啟偵錯日誌
+
+            try {
+                const app = initializeApp(firebaseConfig);
+                window.db = getFirestore(app);
+                window.auth = getAuth(app);
+                
+                // 執行自動驗證，確保資料安全存取
+                if (initialAuthToken) {
+                    await signInWithCustomToken(window.auth, initialAuthToken);
+                } else {
+                    await signInAnonymously(window.auth);
+                }
+                
+                window.userId = window.auth.currentUser.uid;
+                
+                // 顯示使用者 ID
+                document.getElementById('user-id-display').textContent = `ID: ${window.userId}`;
+                
+                // 驗證成功後，啟動資料監聽
+                fetchTransactions();
+
+            } catch (error) {
+                console.error("Firebase 設定或登入失敗:", error);
+                showMessage('Firebase 連線失敗。', 'error');
+            }
+        }
+
+        // --- 4. Firestore 資料操作 (CRUD) ---
+
+        /**
+         * 新增一筆交易記錄。
+         */
+        async function addTransaction() {
+            if (!window.db || !window.userId) {
+                showMessage('應用程式尚未準備好。', 'warning');
+                return;
+            }
+
+            const typeEl = document.getElementById('transaction-type');
+            const descEl = document.getElementById('transaction-description');
+            const amountEl = document.getElementById('transaction-amount');
+
+            const type = typeEl.value;
+            const description = descEl.value.trim();
+            const amount = parseFloat(amountEl.value);
+
+            if (isNaN(amount) || amount <= 0 || !description) {
+                showMessage('請輸入有效的金額和描述。', 'warning');
+                return;
+            }
+
+            document.getElementById('add-button').textContent = '新增中...';
+            document.getElementById('add-button').disabled = true;
+
+            try {
+                // 資料路徑: artifacts/{appId}/users/{userId}/transactions
+                const transactionRef = collection(window.db, 'artifacts', appId, 'users', window.userId, 'transactions');
+                
+                await addDoc(transactionRef, {
+                    type,
+                    description,
+                    amount,
+                    createdAt: serverTimestamp() // 使用伺服器時間戳記
+                });
+                
+                // 成功回饋與清空
+                descEl.value = '';
+                amountEl.value = '';
+                showMessage('✅ 交易新增成功！', 'success');
+
+            } catch (error) {
+                console.error("Error adding document: ", error);
+                showMessage('新增交易失敗: ' + error.message, 'error');
+            } finally {
+                document.getElementById('add-button').textContent = '確認新增';
+                document.getElementById('add-button').disabled = false;
+            }
+        }
+
+        /**
+         * 刪除一筆交易記錄。
+         * 註: 在真實應用中，會在這裡彈出自定義確認框。
+         * @param {string} docId - 交易文件的 ID。
+         */
+        async function deleteTransaction(docId) {
+            if (!window.db || !window.userId) {
+                showMessage('應用程式尚未準備好。', 'warning');
+                return;
+            }
+
+            try {
+                const docRef = doc(window.db, 'artifacts', appId, 'users', window.userId, 'transactions', docId);
+                await deleteDoc(docRef);
+                showMessage('🗑️ 交易已刪除。', 'warning');
+            } catch (error) {
+                console.error("Error removing document: ", error);
+                showMessage('刪除交易失敗: ' + error.message, 'error');
+            }
+        }
+
+
+        // --- 5. UI 即時更新 (onSnapshot) ---
+
+        /**
+         * 監聽 Firestore 交易資料並即時更新 UI。
+         */
+        function fetchTransactions() {
+            if (!window.db || !window.userId) return;
+
+            const transactionCollectionRef = collection(window.db, 'artifacts', appId, 'users', window.userId, 'transactions');
+            // 由於 Firestore 不支援直接對 serverTimestamp 排序，我們需要使用 JavaScript 在本地排序。
+            // 這裡不使用 orderBy，避免需要建立索引。
+            const q = transactionCollectionRef; 
+
+            // 啟動即時監聽
+            onSnapshot(q, (snapshot) => {
+                let totalIncome = 0;
+                let totalExpense = 0;
+                let transactions = []; // 用於儲存從 Firestore 獲取的資料
+
+                snapshot.forEach((doc) => {
+                    const data = doc.data();
+                    const amount = data.amount || 0;
+                    const type = data.type;
+                    
+                    if (type === 'income') {
+                        totalIncome += amount;
+                    } else if (type === 'expense') {
+                        totalExpense += amount;
+                    }
+
+                    // 處理日期物件（如果 createdAt 存在）
+                    const dateObj = data.createdAt ? data.createdAt.toDate() : new Date();
+
+                    transactions.push({
+                        ...data,
+                        id: doc.id,
+                        date: dateObj,
+                        timestamp: dateObj.getTime() // 獲取時間戳記用於排序
+                    });
+                });
+
+                // **本地排序:** 按照時間戳記降冪排列 (最新的在最上面)
+                transactions.sort((a, b) => b.timestamp - a.timestamp);
+
+                // 更新 UI
+                updateSummary(totalIncome, totalExpense);
+                renderHistory(transactions);
+
+            }, (error) => {
+                console.error("Error listening to transactions: ", error);
+                showMessage('無法即時更新資料，請檢查網路。', 'error');
+            });
+        }
+
+        /**
+         * 更新頁面上的總結區塊。
+         */
+        function updateSummary(income, expense) {
+            const netBalance = income - expense;
+
+            document.getElementById('total-income').textContent = fmtMoney(income);
+            document.getElementById('total-expense').textContent = fmtMoney(expense);
+            document.getElementById('net-balance').textContent = fmtMoney(netBalance);
+            
+            // 根據餘額正負設定卡片顏色
+            const balanceEl = document.getElementById('net-balance-card');
+            balanceEl.classList.remove('bg-orange-500', 'bg-emerald-500', 'bg-red-500', 'bg-gray-500');
+
+            if (netBalance > 0) {
+                balanceEl.classList.add('bg-emerald-500');
+            } else if (netBalance < 0) {
+                balanceEl.classList.add('bg-red-500');
+            } else {
+                balanceEl.classList.add('bg-gray-500');
+            }
+        }
+
+        /**
+         * 渲染歷史記錄列表。
+         */
+        function renderHistory(transactions) {
+            const listEl = document.getElementById('history-list');
+            const emptyEl = document.getElementById('empty-state');
+            const loadingEl = document.getElementById('loading-message');
+            listEl.innerHTML = '';
+            
+            // 隱藏載入訊息
+            loadingEl.classList.add('hidden');
+
+            if (transactions.length === 0) {
+                emptyEl.classList.remove('hidden');
+                return;
+            }
+
+            emptyEl.classList.add('hidden');
+
+            transactions.forEach(tx => {
+                const isExpense = tx.type === 'expense';
+                const sign = isExpense ? '-' : '+';
+                const colorClass = isExpense ? 'text-expense' : 'text-income';
+                const borderColor = isExpense ? 'border-red-400' : 'border-emerald-400';
+
+                const item = document.createElement('div');
+                item.className = `flex items-center justify-between p-4 bg-white rounded-xl border-l-4 ${borderColor} transition duration-150 shadow-sm`;
+                item.innerHTML = `
+                    <div class="flex-1 min-w-0">
+                        <p class="text-base font-medium text-gray-800 truncate">${tx.description}</p>
+                        <p class="text-xs text-gray-500 mt-0.5">${formatDate(tx.date)}</p>
+                    </div>
+                    <div class="flex items-center space-x-3">
+                        <p class="text-lg font-bold ${colorClass}">
+                            ${sign} ${fmtMoney(tx.amount)}
+                        </p>
+                        <button onclick="deleteTransaction('${tx.id}')" class="text-gray-400 hover:text-red-600 transition duration-150 p-1 rounded-full hover:bg-red-50">
+                            <!-- SVG 垃圾桶圖標 -->
+                            <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="lucide lucide-trash-2"><path d="M3 6h18"/><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"/><path d="M10 11v6"/><path d="M14 11v6"/></svg>
+                        </button>
+                    </div>
+                `;
+                listEl.appendChild(item);
+            });
+        }
+
+        // --- 6. 啟動程序 ---
+
+        document.addEventListener('DOMContentLoaded', setupFirebase);
+    </script>
+</body>
+</html>
+
