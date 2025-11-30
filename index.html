@@ -10,11 +10,10 @@
     <!-- 圖表函式庫 -->
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
     
-    <!-- PWA 核心：連結 manifest 檔案 -->
+    <!-- PWA 核心：連結 manifest 檔案 (假設您已建立) -->
     <link rel="manifest" href="./manifest.json">
     
     <style>
-        /* 確保 PWA 在獨立模式下運作順暢 */
         body {
             font-family: 'Inter', 'Microsoft JhengHei', 'sans-serif';
             background-color: #f0f4f8;
@@ -36,6 +35,9 @@
         }
         input[type=number] {
           -moz-appearance: textfield;
+        }
+        .transition-transform {
+            transition: transform 0.2s ease-in-out;
         }
     </style>
 </head>
@@ -235,6 +237,8 @@
         
         // 模擬 Firebase 設定 (請使用者替換為自己的正式設定)
         const mockFirebaseConfig = {
+            // 注意：這個模擬設定可能無法在外部環境運行！
+            // 如果您需要永久儲存，請到 Firebase 建立專案並替換這裡的 config
             apiKey: "AIzaSyC-placeholder-for-test-only", 
             authDomain: "test-only.firebaseapp.com",
             projectId: "test-only-project",
@@ -263,8 +267,8 @@
         window.db = null;
         window.auth = null;
         window.userId = null;
-        let transactionsCache = {}; // 用於儲存交易資料，方便編輯時查找和圖表計算
-        let expenseChart = null; // Chart.js 實例
+        let transactionsCache = {}; 
+        let expenseChart = null; 
 
         // 交易類別設定
         const categories = {
@@ -278,9 +282,10 @@
         window.openEditModal = openEditModal;
         window.saveEditTransaction = saveEditTransaction;
         window.closeEditModal = closeEditModal;
-        window.showTab = showTab; // 頁籤切換
-        window.exportDataAsCsv = exportDataAsCsv; // 匯出功能
-        window.importDataFromCsv = importDataFromCsv; // 匯入功能
+        window.showTab = showTab; 
+        window.exportDataAsCsv = exportDataAsCsv; 
+        window.importDataFromCsv = importDataFromCsv; 
+
 
         // --- 輔助函式 ---
         function showMessage(message, type) {
@@ -371,35 +376,26 @@
                 drawExpenseChart(Object.values(transactionsCache));
             }
         }
-
-
-        // --- 2. Firebase 核心設定與驗證 ---
-
-        async function setupFirebase() {
-            setLogLevel('debug');
-
-            try {
-                const app = initializeApp(firebaseConfig);
-                window.db = getFirestore(app);
-                window.auth = getAuth(app);
-                
-                if (initialAuthToken && !isMockConfig) {
-                    await signInWithCustomToken(window.auth, initialAuthToken);
-                } else {
-                    await signInAnonymously(window.auth);
-                }
-                
-                window.userId = window.auth.currentUser.uid;
-                
-                document.getElementById('user-id-display').textContent = `ID: ${window.userId}`;
-                
-                document.getElementById('transaction-date').value = formatInputDate(new Date());
-                
-                updateCategoryOptions();
-                document.getElementById('transaction-type').addEventListener('change', updateCategoryOptions);
-
-                fetchTransactions();
-
-            } catch (error) {
-                console.error("Firebase 設定或登入失敗:", error);
-                show
+        
+        function updateSummary(totalIncome, totalExpense) {
+            const netBalance = totalIncome - totalExpense;
+            
+            document.getElementById('total-income').textContent = fmtMoney(totalIncome);
+            document.getElementById('total-expense').textContent = fmtMoney(totalExpense);
+            document.getElementById('net-balance').textContent = fmtMoney(netBalance);
+            
+            const netCard = document.getElementById('net-balance-card');
+            netCard.classList.remove('bg-gray-500', 'bg-emerald-500', 'bg-red-500');
+            
+            if (netBalance >= 0) {
+                netCard.classList.add('bg-emerald-500');
+            } else {
+                netCard.classList.add('bg-red-500');
+            }
+        }
+        
+        function renderHistory(transactions) {
+            const list = document.getElementById('history-list');
+            const loadingMessage = document.getElementById('loading-message');
+            const emptyState = document.getElementById('empty-state');
+     
