@@ -1,420 +1,458 @@
-<!DOCTYPE html>
-<html lang="zh-TW">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>雲端記帳本</title>
-    <!-- 載入 Tailwind CSS -->
-    <script src="https://cdn.tailwindcss.com"></script>
-    <!-- 載入 Lucide Icons -->
-    <script src="https://unpkg.com/lucide@latest"></script>
-    <!-- 載入 Chart.js 用於圖表分析 -->
-    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
-    <style>
-        /* 使用 Inter 字體 */
-        body { font-family: 'Inter', sans-serif; background-color: #f7f7f7; }
-        /* 確保容器在手機上居中且好看 */
-        .container { max-width: 480px; margin: auto; padding: 1rem; min-height: 100vh; }
-    </style>
-</head>
-<body>
-    <div class="container">
-        <!-- Header & User Info -->
-        <header class="text-center mb-6 pt-4">
-            <h1 class="text-3xl font-extrabold text-gray-900">雲端記帳本</h1>
-            <p id="auth-status" class="text-xs text-gray-500 mt-1 text-red-500">連線中...</p>
-            <p class="text-xs text-gray-500 mt-1 truncate">
-                使用者 ID: <span id="user-id" class="font-mono text-gray-700">等待驗證...</span>
-            </p>
-        </header>
+import { ChangeDetectionStrategy, Component, computed, signal, effect, OnInit } from '@angular/core';
+import { initializeApp, FirebaseApp } from 'firebase/app';
+import { getAuth, signInAnonymously, signInWithCustomToken, Auth, onAuthStateChanged, User } from 'firebase/auth';
+import { getFirestore, doc, addDoc, onSnapshot, collection, query, Firestore, Timestamp, Unsubscribe } from 'firebase/firestore';
+import { ReactiveFormsModule, FormBuilder, Validators } from '@angular/forms';
+import { CommonModule } from '@angular/common';
 
-        <!-- Balance Summary -->
-        <div class="flex justify-between gap-2 mb-6 p-4 bg-white rounded-xl shadow-lg">
-            <div class="flex-1 p-2 text-center rounded-lg bg-green-50 text-green-700">
-                <div class="text-sm font-medium">總收入</div>
-                <div id="total-income" class="text-xl font-bold mt-1">NT$ 0</div>
-            </div>
-            <div class="flex-1 p-2 text-center rounded-lg bg-red-50 text-red-700">
-                <div class="text-sm font-medium">總支出</div>
-                <div id="total-expense" class="text-xl font-bold mt-1">NT$ 0</div>
-            </div>
-            <div class="flex-1 p-2 text-center rounded-lg bg-gray-700 text-white">
-                <div class="text-sm font-medium">淨餘額</div>
-                <div id="net-balance" class="text-xl font-bold mt-1">NT$ 0</div>
-            </div>
+// --- 全域變數存取 (Global Variable Access) ---
+// 確保安全地存取 Canvas 環境提供的 Firebase 配置和 Auth Token
+declare const __firebase_config: string | undefined;
+declare const __app_id: string | undefined;
+declare const __initial_auth_token: string | undefined;
+
+// Firebase 配置
+const APP_ID = typeof __app_id !== 'undefined' ? __app_id : 'default-budget-app';
+const FIREBASE_CONFIG = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : null;
+const INITIAL_AUTH_TOKEN = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : undefined;
+
+// Gemini API 配置
+const GEMINI_API_MODEL = "gemini-2.5-flash-preview-09-2025";
+const API_URL = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_API_MODEL}:generateContent?key=`;
+
+// 預定義分類
+const EXPENSE_CATEGORIES = [
+  '餐飲 (Food & Drink)', '交通 (Transportation)', '娛樂 (Entertainment)', 
+  '帳單 (Bills)', '購物 (Shopping)', '醫療 (Medical)', '旅行 (Travel)', '教育 (Education)', 
+  '房屋 (Housing)', '投資 (Investment)', '其他 (Other)'
+];
+const INCOME_CATEGORIES = [
+  '薪資 (Salary)', '獎金 (Bonus)', '利息 (Interest)', 
+  '投資收益 (Investment)', '兼職 (Part-Time)', '其他 (Other)'
+];
+const ALL_CATEGORIES = ['所有類別 (All Categories)', ...EXPENSE_CATEGORIES, ...INCOME_CATEGORIES];
+
+// 交易資料介面
+interface Transaction {
+  id: string;
+  type: 'income' | 'expense';
+  date: Timestamp;
+  category: string; // 新增類別欄位
+  description: string;
+  amount: number;
+}
+
+// 格式化為新台幣
+const formatCurrency = (amount: number): string => `NT$ ${amount.toLocaleString('en-US', { minimumFractionDigits: 0, maximumFractionDigits: 0 })}`;
+
+@Component({
+  selector: 'app-root',
+  standalone: true,
+  imports: [CommonModule, ReactiveFormsModule],
+  template: `
+    <div class="min-h-screen bg-gray-50 p-4 font-sans antialiased">
+      <!-- 應用程式標題 -->
+      <header class="text-center mb-6">
+        <h1 class="text-3xl font-bold text-gray-800">雲端記帳本 <span class="text-sm font-light text-blue-500">(AI 智能版)</span></h1>
+        <p [ngClass]="{'text-green-600': isAuthReady(), 'text-red-500': !isAuthReady()}"
+           class="text-sm font-medium mt-1">
+          狀態: {{ isAuthReady() ? '已連線' : '連線中...' }}
+        </p>
+        <p class="text-xs text-gray-500 mt-0">
+          使用者 ID: {{ userId() ? userId() : 'ID: 等待驗證...' }}
+        </p>
+      </header>
+
+      <!-- 總覽卡片 -->
+      <div class="grid grid-cols-3 gap-3 mb-6">
+        <div class="bg-white p-3 rounded-xl shadow-lg text-center border-b-4 border-green-500">
+          <p class="text-sm text-gray-500">總收入</p>
+          <p class="text-xl font-semibold text-green-600 mt-1">{{ formatCurrency(totalIncome()) }}</p>
         </div>
-
-        <!-- New Transaction Form -->
-        <div class="bg-white p-6 rounded-xl shadow-lg mb-6">
-            <h2 class="text-2xl font-semibold mb-4 text-gray-800">新增交易 (資料將儲存在雲端)</h2>
-            <form id="transaction-form">
-                <!-- Type and Date -->
-                <div class="grid grid-cols-2 gap-4 mb-4">
-                    <div>
-                        <label class="block text-sm font-medium text-gray-700 mb-1">類型</label>
-                        <select id="type" name="type" required
-                            class="w-full p-2 border border-gray-300 rounded-lg focus:ring-orange-500 focus:border-orange-500">
-                            <option value="expense">支出</option>
-                            <option value="income">收入</option>
-                        </select>
-                    </div>
-                    <div>
-                        <label class="block text-sm font-medium text-gray-700 mb-1">日期</label>
-                        <input type="date" id="date" name="date" required
-                            class="w-full p-2 border border-gray-300 rounded-lg focus:ring-orange-500 focus:border-orange-500">
-                    </div>
-                </div>
-
-                <!-- Category and Description -->
-                <div class="grid grid-cols-1 gap-4 mb-4">
-                    <div>
-                        <label class="block text-sm font-medium text-gray-700 mb-1">類別</label>
-                        <select id="category" name="category"
-                            class="w-full p-2 border border-gray-300 rounded-lg focus:ring-orange-500 focus:border-orange-500">
-                            <option value="餐飲">餐飲</option>
-                            <option value="交通">交通</option>
-                            <option value="生活用品">生活用品</option>
-                            <option value="娛樂">娛樂</option>
-                            <option value="薪資">薪資 (收入)</option>
-                            <option value="投資">投資 (收入/支出)</option>
-                            <option value="其他">其他</option>
-                        </select>
-                    </div>
-                    <div>
-                        <label class="block text-sm font-medium text-gray-700 mb-1">描述</label>
-                        <input type="text" id="description" name="description" placeholder="例如：午餐, 加班費" required
-                            class="w-full p-3 border border-gray-300 rounded-lg focus:ring-orange-500 focus:border-orange-500">
-                    </div>
-                </div>
-
-                <!-- Amount -->
-                <div class="mb-6">
-                    <label class="block text-sm font-medium text-gray-700 mb-1">金額 (NT$)</label>
-                    <input type="number" id="amount" name="amount" placeholder="例如: 150" required min="0.01" step="0.01"
-                        class="w-full p-3 border border-gray-300 rounded-lg focus:ring-orange-500 focus:border-orange-500">
-                </div>
-
-                <button type="submit" id="submit-btn"
-                    class="w-full py-3 bg-orange-600 text-white font-semibold rounded-xl hover:bg-orange-700 transition duration-150 shadow-lg shadow-orange-200 disabled:opacity-50">
-                    確認新增到雲端
-                </button>
-            </form>
+        <div class="bg-white p-3 rounded-xl shadow-lg text-center border-b-4 border-red-500">
+          <p class="text-sm text-gray-500">總支出</p>
+          <p class="text-xl font-semibold text-red-600 mt-1">{{ formatCurrency(totalExpense()) }}</p>
         </div>
-
-        <!-- Analysis and Export/Import Section -->
-        <div class="bg-white p-6 rounded-xl shadow-lg mb-6">
-            <h2 class="text-2xl font-semibold mb-4 text-gray-800">圖表分析與資料傳輸</h2>
-
-            <!-- Export and Import Buttons -->
-            <div class="grid grid-cols-2 gap-3">
-                <!-- Export Button -->
-                <button id="export-csv-btn"
-                    class="py-2 bg-blue-600 text-white font-semibold rounded-xl hover:bg-blue-700 transition duration-150 shadow-lg shadow-blue-200 disabled:opacity-50">
-                    <i data-lucide="file-text" class="w-5 h-5 inline mr-1 align-text-top"></i> 匯出 CSV
-                </button>
-
-                <!-- Import Button and Hidden Input -->
-                <div class="relative">
-                    <input type="file" id="import-file-input" accept=".csv" class="hidden">
-                    <button id="import-csv-btn"
-                        class="w-full py-2 bg-purple-600 text-white font-semibold rounded-xl hover:bg-purple-700 transition duration-150 shadow-lg shadow-purple-200 disabled:opacity-50">
-                        <i data-lucide="upload" class="w-5 h-5 inline mr-1 align-text-top"></i> 匯入 CSV
-                    </button>
-                </div>
-            </div>
-
-            <!-- Chart -->
-            <div class="mt-6 pt-4 border-t border-gray-100">
-                <h3 class="text-xl font-medium mb-3 text-gray-700">支出類別分佈</h3>
-                <div class="relative h-64 w-full">
-                    <canvas id="expense-chart"></canvas>
-                </div>
-                <p id="chart-status" class="text-center text-sm text-gray-500 mt-2">無足夠數據進行分析。</p>
-            </div>
+        <div class="bg-white p-3 rounded-xl shadow-lg text-center border-b-4 border-blue-500">
+          <p class="text-sm text-gray-500">淨餘額</p>
+          <p class="text-xl font-semibold text-blue-600 mt-1">{{ formatCurrency(netBalance()) }}</p>
         </div>
+      </div>
+
+      <!-- 新增交易表單 -->
+      <div class="bg-white p-5 rounded-xl shadow-lg mb-6">
+        <h2 class="text-xl font-semibold text-gray-700 mb-4">
+          新增交易 <span class="text-sm text-gray-500">(資料將儲存在雲端)</span>
+        </h2>
+        <form [formGroup]="transactionForm" (ngSubmit)="addTransaction()">
+          
+          <!-- 交易類型 (Type) -->
+          <div class="mb-4">
+            <label class="block text-sm font-medium text-gray-700 mb-1">類型</label>
+            <select formControlName="type"
+                    (change)="updateCategoryOptions()"
+                    class="w-full p-3 border border-gray-300 rounded-lg focus:ring-blue-500 focus:border-blue-500 transition duration-150">
+              <option value="expense">支出</option>
+              <option value="income">收入</option>
+            </select>
+          </div>
+          
+          <!-- 日期 (Date) -->
+          <div class="mb-4">
+            <label class="block text-sm font-medium text-gray-700 mb-1">日期</label>
+            <input type="date" formControlName="date" required
+                   class="w-full p-3 border border-gray-300 rounded-lg focus:ring-blue-500 focus:border-blue-500 transition duration-150">
+          </div>
+
+          <!-- 描述 (Description) -->
+          <div class="mb-4">
+            <label class="block text-sm font-medium text-gray-700 mb-1">描述</label>
+            <input type="text" formControlName="description" placeholder="例如: 星巴克咖啡, 客戶服務費" required
+                   class="w-full p-3 border border-gray-300 rounded-lg focus:ring-blue-500 focus:border-blue-500 transition duration-150">
+          </div>
+          
+          <!-- AI 自動分類按鈕 -->
+          <div class="flex space-x-2 mb-4">
+              <div class="flex-1">
+                  <label class="block text-sm font-medium text-gray-700 mb-1">類別</label>
+                  <select formControlName="category" required
+                          class="w-full p-3 border border-gray-300 rounded-lg focus:ring-blue-500 focus:border-blue-500 transition duration-150">
+                    <option *ngFor="let cat of currentCategories()" [value]="cat">{{ cat }}</option>
+                  </select>
+              </div>
+              <div class="flex items-end">
+                  <button type="button" (click)="autoCategorize()" [disabled]="isCategorizing() || transactionForm.get('description')?.invalid"
+                          class="w-full h-[46px] py-1 px-3 rounded-lg font-bold text-white text-sm transition duration-200"
+                          [ngClass]="{'bg-purple-600 hover:bg-purple-700 shadow-md': !isCategorizing(), 'bg-gray-400 cursor-not-allowed': isCategorizing()}">
+                      <span *ngIf="!isCategorizing()">AI 建議分類</span>
+                      <span *ngIf="isCategorizing()">
+                          <svg class="animate-spin h-4 w-4 inline-block mr-1" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                              <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                              <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                          </svg>
+                          分析中...
+                      </span>
+                  </button>
+              </div>
+          </div>
+
+
+          <!-- 金額 (Amount) -->
+          <div class="mb-6">
+            <label class="block text-sm font-medium text-gray-700 mb-1">金額 (NT$)</label>
+            <input type="number" formControlName="amount" placeholder="例如: 150" required
+                   class="w-full p-3 border border-gray-300 rounded-lg focus:ring-blue-500 focus:border-blue-500 transition duration-150">
+            <div *ngIf="transactionForm.get('amount')?.invalid && transactionForm.get('amount')?.touched" class="text-xs text-red-500 mt-1">
+                金額必須是正數。
+            </div>
+          </div>
+          
+          <!-- 提交按鈕 -->
+          <button type="submit" [disabled]="transactionForm.invalid || isAdding()"
+                  class="w-full py-3 px-4 rounded-lg font-bold text-white transition duration-200"
+                  [ngClass]="{'bg-blue-600 hover:bg-blue-700 active:scale-[0.98] shadow-md': !transactionForm.invalid && !isAdding(), 'bg-gray-400 cursor-not-allowed': transactionForm.invalid || isAdding()}">
+            {{ isAdding() ? '正在儲存...' : '確認新增到雲端' }}
+          </button>
+          <div *ngIf="errorMessage()" class="text-sm text-red-600 mt-3 text-center">{{ errorMessage() }}</div>
+
+        </form>
+      </div>
+
+      <!-- 歷史記錄 (History) -->
+      <div class="bg-white p-5 rounded-xl shadow-lg">
+        <h2 class="text-xl font-semibold text-gray-700 mb-4">歷史記錄</h2>
         
-        <!-- Transaction List -->
-        <div class="bg-white p-6 rounded-xl shadow-lg">
-            <h2 class="text-2xl font-semibold mb-4 text-gray-800">歷史記錄 (來自 Firestore)</h2>
-            <div id="transaction-list" class="space-y-3">
-                <p id="loading-message" class="text-gray-500 text-center py-4">
-                    <svg class="animate-spin h-5 w-5 mr-3 inline text-orange-600" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4" fill="none" class="opacity-25"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg>
-                    載入資料中...
-                </p>
-                <!-- Transactions will be inserted here by JavaScript -->
-            </div>
+        <!-- 類別篩選器 -->
+        <div class="mb-4">
+            <label for="categoryFilter" class="block text-sm font-medium text-gray-700 mb-1">篩選類別</label>
+            <select id="categoryFilter" (change)="filterCategory.set($event.target.value)"
+                    class="w-full p-3 border border-gray-300 rounded-lg focus:ring-indigo-500 focus:border-indigo-500 transition duration-150">
+                <option *ngFor="let cat of ALL_CATEGORIES" [value]="cat">{{ cat }}</option>
+            </select>
         </div>
 
-        <!-- Custom Alert Modal -->
-        <div id="custom-modal" class="fixed inset-0 bg-gray-600 bg-opacity-50 hidden items-center justify-center p-4 z-50">
-            <div class="bg-white p-6 rounded-lg shadow-xl w-full max-w-sm">
-                <h3 id="modal-title" class="text-xl font-bold mb-4 text-red-600"></h3>
-                <p id="modal-message" class="text-gray-700 mb-6"></p>
-                <div class="flex justify-end space-x-3">
-                    <button id="modal-cancel-btn" class="px-4 py-2 bg-gray-200 text-gray-800 rounded-lg hover:bg-gray-300 transition hidden">取消</button>
-                    <button id="modal-confirm-btn" class="px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700 transition">確定</button>
-                </div>
-            </div>
+
+        <div *ngIf="!isAuthReady() || isLoading()" class="text-center p-4 text-gray-500">
+          <svg class="animate-spin h-5 w-5 mr-3 inline-block" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+            <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+            <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+          </svg>
+          資料載入中...
         </div>
+
+        <div *ngIf="isAuthReady() && !isLoading() && filteredTransactions().length === 0" class="text-center p-4 text-gray-500">
+          <p>
+            <span *ngIf="filterCategory() === '所有類別 (All Categories)'">暫無交易記錄。新增一筆開始記帳吧！</span>
+            <span *ngIf="filterCategory() !== '所有類別 (All Categories)'">在 {{ filterCategory() }} 類別下找不到記錄。</span>
+          </p>
+        </div>
+
+        <ul *ngIf="isAuthReady() && !isLoading() && filteredTransactions().length > 0" class="space-y-3">
+          <li *ngFor="let tx of filteredTransactions()" class="flex justify-between items-center p-3 rounded-lg shadow-sm"
+              [ngClass]="{'bg-green-50/50 border-l-4 border-green-500': tx.type === 'income', 'bg-red-50/50 border-l-4 border-red-500': tx.type === 'expense'}">
+            <div class="flex-1 min-w-0">
+              <p class="text-xs text-gray-500">
+                {{ tx.date.toDate() | date: 'yyyy/MM/dd' }}
+              </p>
+              <p class="font-medium truncate text-gray-800">
+                {{ tx.description }}
+                <span class="text-xs font-semibold px-2 py-0.5 rounded-full"
+                      [ngClass]="{'bg-green-200 text-green-800': tx.type === 'income', 'bg-red-200 text-red-800': tx.type === 'expense'}">
+                    {{ tx.category }}
+                </span>
+              </p>
+            </div>
+            <div class="ml-4 text-right">
+              <p class="font-bold" [ngClass]="{'text-green-600': tx.type === 'income', 'text-red-600': tx.type === 'expense'}">
+                {{ tx.type === 'income' ? '+' : '-' }}{{ formatCurrency(tx.amount) }}
+              </p>
+            </div>
+          </li>
+        </ul>
+      </div>
+
+      <!-- 錯誤訊息模態框 -->
+      <div *ngIf="showErrorModal()" class="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
+          <div class="bg-white p-6 rounded-xl shadow-2xl max-w-sm w-full">
+              <h3 class="text-xl font-bold text-red-600 mb-4">連線錯誤</h3>
+              <p class="text-gray-700 mb-6">無法連線到雲端服務，請檢查網路。</p>
+              <p class="text-sm text-gray-500 break-words mb-4">錯誤訊息: {{ modalErrorMessage() }}</p>
+              <div class="flex justify-end">
+                  <button (click)="showErrorModal.set(false)" class="bg-red-500 hover:bg-red-600 text-white font-bold py-2 px-4 rounded-lg transition">確定</button>
+              </div>
+          </div>
+      </div>
+
     </div>
+  `,
+  styles: [`
+    /* 確保容器全寬且響應式 */
+    .min-h-screen {
+      min-height: 100vh;
+    }
+    .font-sans {
+      font-family: 'Inter', sans-serif;
+    }
+  `],
+  changeDetection: ChangeDetectionStrategy.OnPush,
+})
+export class App implements OnInit {
+  // Firebase 相關信號
+  app: FirebaseApp | null = null;
+  auth: Auth | null = null;
+  db: Firestore | null = null;
 
-    <!-- Firebase SDKs -->
-    <script type="module">
-        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
-        import { 
-            getAuth, 
-            signInAnonymously, 
-            signInWithCustomToken, 
-            onAuthStateChanged 
-        } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
-        import { 
-            getFirestore, 
-            collection, 
-            query, 
-            onSnapshot, 
-            addDoc, 
-            deleteDoc, 
-            doc,
-            serverTimestamp 
-        } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+  // 應用程式狀態信號
+  userId = signal<string | null>(null);
+  isAuthReady = signal(false);
+  isLoading = signal(true);
+  isAdding = signal(false);
+  isCategorizing = signal(false); // AI 狀態
+  errorMessage = signal<string | null>(null);
+  showErrorModal = signal(false);
+  modalErrorMessage = signal<string>('');
+  
+  // 篩選狀態信號
+  filterCategory = signal<string>('所有類別 (All Categories)');
+  currentCategories = signal<string[]>(EXPENSE_CATEGORIES); // 當前選單中的類別
 
-        // 全域變數聲明
-        let db;
-        let auth;
-        let currentUserId = null;
-        let transactionsCollectionRef = null;
-        let expenseChartInstance = null; 
-        window.allTransactions = []; 
+  // 交易資料信號
+  transactions = signal<Transaction[]>([]);
+  
+  // 表單控制
+  transactionForm = this.fb.group({
+    type: ['expense', Validators.required],
+    date: [this.formatDate(new Date()), Validators.required],
+    description: ['', Validators.required],
+    category: [EXPENSE_CATEGORIES[0], Validators.required], // 新增類別控制項
+    amount: [null, [Validators.required, Validators.min(0.01)]],
+  });
 
-        // 獲取執行環境提供的全域變數
-        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
-        const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+  // 過濾後的交易列表 (Computed Signal)
+  filteredTransactions = computed(() => {
+    const filter = this.filterCategory();
+    const allTxs = this.transactions();
 
-        // HTML 元素
-        const userIdEl = document.getElementById('user-id');
-        const authStatusEl = document.getElementById('auth-status');
-        const listEl = document.getElementById('transaction-list');
-        const formEl = document.getElementById('transaction-form');
-        const submitBtn = document.getElementById('submit-btn');
-        const loadingMessageEl = document.getElementById('loading-message');
-        const exportCsvBtn = document.getElementById('export-csv-btn');
-        const importCsvBtn = document.getElementById('import-csv-btn');
-        const importFileInput = document.getElementById('import-file-input');
-        const chartStatusEl = document.getElementById('chart-status');
-        const chartCanvas = document.getElementById('expense-chart');
+    if (filter === '所有類別 (All Categories)') {
+      return allTxs;
+    }
+    return allTxs.filter(tx => tx.category === filter);
+  });
 
+  // 匯總計算結果
+  totalIncome = computed(() => 
+    this.transactions().filter(t => t.type === 'income').reduce((sum, t) => sum + t.amount, 0)
+  );
+  totalExpense = computed(() => 
+    this.transactions().filter(t => t.type === 'expense').reduce((sum, t) => sum + t.amount, 0)
+  );
+  netBalance = computed(() => this.totalIncome() - this.totalExpense());
 
-        // --- 輔助函數 ---
+  constructor(private fb: FormBuilder) {
+    // 監聽驗證狀態變化並啟動 Firestore 資料監聽
+    effect(() => {
+      if (this.isAuthReady() && this.db && this.userId()) {
+        this.setupFirestoreListener(this.db, this.userId()!);
+      }
+    });
 
-        /**
-         * 格式化數字為 NT$ 貨幣字串。
-         */
-        function formatCurrency(amount) {
-            if (typeof amount !== 'number' || isNaN(amount)) return '0';
-            return new Intl.NumberFormat('zh-TW', { 
-                style: 'decimal', 
-                minimumFractionDigits: 0 
-            }).format(amount);
-        }
+    // 監聽 Type 變化，即時更新類別選項和預設值
+    this.transactionForm.get('type')?.valueChanges.subscribe(type => {
+        this.updateCategoryOptions();
+    });
+  }
 
-        /**
-         * 自訂模態框取代 window.confirm/alert
-         */
-        function showModal(title, message, isConfirm = false) {
-            const modalEl = document.getElementById('custom-modal');
-            document.getElementById('modal-title').textContent = title;
-            document.getElementById('modal-message').textContent = message;
-            const confirmBtn = document.getElementById('modal-confirm-btn');
-            const cancelBtn = document.getElementById('modal-cancel-btn');
+  ngOnInit(): void {
+    this.initializeFirebaseAndAuth();
+  }
 
-            confirmBtn.textContent = isConfirm ? '確認刪除' : '確定';
-            confirmBtn.className = isConfirm 
-                ? 'px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700 transition'
-                : 'px-4 py-2 bg-orange-600 text-white rounded-lg hover:bg-orange-700 transition';
-            
-            cancelBtn.classList.toggle('hidden', !isConfirm);
-            modalEl.classList.remove('hidden');
-            modalEl.classList.add('flex');
+  // 根據 Type 更新可選的 Category 列表
+  updateCategoryOptions(): void {
+    const type = this.transactionForm.get('type')?.value;
+    const newCategories = type === 'income' ? INCOME_CATEGORIES : EXPENSE_CATEGORIES;
+    this.currentCategories.set(newCategories);
+    // 重設 category，使用新的類別清單中的第一個作為預設值
+    this.transactionForm.get('category')?.setValue(newCategories[0]);
+  }
 
-            return new Promise(resolve => {
-                const onConfirm = () => {
-                    modalEl.classList.add('hidden');
-                    modalEl.classList.remove('flex');
-                    confirmBtn.removeEventListener('click', onConfirm);
-                    cancelBtn.removeEventListener('click', onCancel);
-                    resolve(true);
-                };
+  // 將 Date 物件格式化為 YYYY-MM-DD 字符串，用於 HTML input[type="date"]
+  private formatDate(date: Date): string {
+    const d = new Date(date);
+    let month = '' + (d.getMonth() + 1);
+    let day = '' + d.getDate();
+    const year = d.getFullYear();
 
-                const onCancel = () => {
-                    modalEl.classList.add('hidden');
-                    modalEl.classList.remove('flex');
-                    confirmBtn.removeEventListener('click', onConfirm);
-                    cancelBtn.removeEventListener('click', onCancel);
-                    resolve(false);
-                };
+    if (month.length < 2) month = '0' + month;
+    if (day.length < 2) day = '0' + day;
 
-                confirmBtn.addEventListener('click', onConfirm);
-                cancelBtn.addEventListener('click', onCancel);
+    return [year, month, day].join('-');
+  }
+
+  // 錯誤處理工具
+  private handleError(message: string, error: unknown): void {
+    console.error(message, error);
+    let errorDetail = '未知錯誤';
+    if (error instanceof Error) {
+        errorDetail = error.message;
+    } else if (typeof error === 'object' && error !== null && 'code' in error) {
+        errorDetail = (error as { code: string }).code;
+    } else if (typeof error === 'string') {
+        errorDetail = error;
+    }
+    this.errorMessage.set('操作失敗。');
+    this.modalErrorMessage.set(errorDetail);
+    this.showErrorModal.set(true);
+    this.isAdding.set(false);
+    this.isCategorizing.set(false);
+    this.isLoading.set(false);
+    setTimeout(() => this.errorMessage.set(null), 5000); // 5秒後清除提示
+  }
+
+  // 處理 API 重試的函式
+  private async fetchWithRetry(url: string, payload: any, attempts = 3): Promise<Response> {
+    for (let i = 0; i < attempts; i++) {
+        try {
+            const response = await fetch(url, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload)
             });
-        }
-
-
-        // --- Firebase 初始化與授權 (強化連線穩定性) ---
-
-        async function initFirebase() {
-            try {
-                // 1. 獲取並嚴格驗證配置，避免 JSON.parse 錯誤
-                const configString = typeof __firebase_config === 'string' ? __firebase_config : '{}';
-                const firebaseConfig = JSON.parse(configString);
-                
-                // 檢查是否有必要的配置資訊 (例如 projectId)
-                if (!firebaseConfig.projectId) {
-                    // 如果配置缺失，則優雅地顯示錯誤訊息並停止雲端連線流程
-                    authStatusEl.textContent = '配置錯誤，無法連線雲端功能';
-                    authStatusEl.className = 'text-xs text-gray-500 mt-1 font-semibold text-red-600';
-                    userIdEl.textContent = '雲端功能不可用';
-                    loadingMessageEl.textContent = '無法連線到雲端資料庫。請檢查環境配置。';
-                    throw new Error("Firebase configuration missing or invalid. Cloud features disabled.");
-                }
-                
-                // 2. 初始化 App 和服務
-                const app = initializeApp(firebaseConfig);
-                db = getFirestore(app);
-                auth = getAuth(app);
-                
-                let authSuccess = false;
-
-                // 3. 嘗試 Custom Token 登入
-                if (initialAuthToken) {
-                    try {
-                        await signInWithCustomToken(auth, initialAuthToken);
-                        authSuccess = true;
-                    } catch (tokenError) {
-                        console.warn("Custom Token sign-in failed (possibly invalid/expired token), attempting anonymous sign-in.", tokenError);
-                    }
-                }
-                
-                // 4. 嘗試匿名登入 (作為備用)
-                if (!authSuccess) {
-                    await signInAnonymously(auth);
-                    authSuccess = true;
-                }
-                
-                // 5. 只有在成功登入後才設定監聽器
-                if (authSuccess) {
-                    onAuthStateChanged(auth, (user) => {
-                        if (user) {
-                            currentUserId = user.uid;
-                            userIdEl.textContent = currentUserId;
-                            authStatusEl.textContent = '已連線到 Firestore';
-                            authStatusEl.className = 'text-xs text-gray-500 mt-1 font-semibold text-green-600';
-                            
-                            // 設定 Firestore 集合路徑 (公共路徑)
-                            const collectionPath = `/artifacts/${appId}/public/data/transactions`;
-                            transactionsCollectionRef = collection(db, collectionPath);
-                            
-                            startRealtimeListener(); // 身份驗證完成後開始監聽資料庫
-                        } else {
-                            userIdEl.textContent = '登入失敗 (請刷新重試)';
-                            authStatusEl.textContent = '未授權';
-                            authStatusEl.className = 'text-xs text-gray-500 mt-1 font-semibold text-red-600';
-                            loadingMessageEl.textContent = '無法獲取授權，請重試。';
-                        }
-                    });
-                } else {
-                     throw new Error("無法連線: Custom Token 和匿名登入都失敗。");
-                }
-
-            } catch (error) {
-                // 如果是手動拋出的 "Cloud features disabled" 錯誤，則不需要彈窗，狀態欄已更新
-                if (!error.message.includes("Cloud features disabled")) {
-                    console.error("Firebase Initialization or Auth Failed:", error);
-                    showModal('連線錯誤', `無法連線到雲端服務，請檢查網路或嘗試刷新。錯誤訊息: ${error.message}`, false);
-                    loadingMessageEl.textContent = '連線失敗，請檢查配置。';
-                }
+            if (response.status === 429 && i < attempts - 1) {
+                // Too many requests, wait with exponential backoff
+                const delay = Math.pow(2, i) * 1000 + Math.random() * 1000;
+                await new Promise(resolve => setTimeout(resolve, delay));
+                continue;
             }
-        }
-
-        // --- 實時資料監聽與渲染 ---
-
-        function startRealtimeListener() {
-            if (!transactionsCollectionRef) return;
-            
-            // 查詢，但不使用 orderBy，避免需要額外索引
-            const q = query(transactionsCollectionRef); 
-
-            onSnapshot(q, (snapshot) => {
-                const transactions = [];
-                snapshot.forEach((doc) => {
-                    const data = doc.data();
-                    transactions.push({
-                        id: doc.id,
-                        ...data
-                    });
-                });
-
-                // 在客戶端進行排序 (時間降序)
-                transactions.sort((a, b) => {
-                    const timeA = a.timestamp?.toMillis ? a.timestamp.toMillis() : new Date(a.date).getTime();
-                    const timeB = b.timestamp?.toMillis ? b.timestamp.toMillis() : new Date(b.date).getTime();
-                    return timeB - timeA;
-                });
-                
-                window.allTransactions = transactions; // 儲存數據供匯出使用
-                renderTransactions(transactions);
-                calculateAndRenderAnalytics(transactions); // 同時渲染分析圖表
-            }, (error) => {
-                console.error("Firestore Snapshot Error:", error);
-                loadingMessageEl.textContent = '載入資料失敗。';
-            });
-        }
-
-        /**
-         * 渲染交易列表和總結算。
-         */
-        function renderTransactions(transactions) {
-            let totalIncome = 0;
-            let totalExpense = 0;
-            listEl.innerHTML = ''; // 清空列表
-            
-            loadingMessageEl.style.display = 'none';
-
-            if (transactions.length === 0) {
-                listEl.innerHTML = '<p class="text-gray-500 text-center py-4">暫無交易記錄。新增一筆來開始記帳吧！</p>';
-                return;
+            if (!response.ok) {
+                throw new Error(`API response error: ${response.statusText}`);
             }
+            return response;
+        } catch (error) {
+            if (i === attempts - 1) throw error;
+            const delay = Math.pow(2, i) * 1000 + Math.random() * 1000;
+            await new Promise(resolve => setTimeout(resolve, delay));
+        }
+    }
+    throw new Error("Failed to fetch from API after multiple retries.");
+  }
 
-            transactions.forEach(tx => {
-                const isIncome = tx.type === 'income';
-                const amount = parseFloat(tx.amount || 0);
 
-                if (isIncome) {
-                    totalIncome += amount;
-                } else {
-                    totalExpense += amount;
-                }
+  // 使用 AI 根據描述自動分類
+  async autoCategorize(): Promise<void> {
+    const description = this.transactionForm.get('description')?.value;
+    const type = this.transactionForm.get('type')?.value;
 
-                const item = document.createElement('div');
-                item.className = `flex justify-between items-center p-4 rounded-xl shadow-sm bg-white border-l-4 transition hover:shadow-md ${isIncome ? 'border-green-500' : 'border-red-500'}`;
-                item.innerHTML = `
-                    <div class="flex-1 min-w-0">
-                        <div class="font-semibold text-lg truncate text-gray-800">
-                            ${isIncome ? '收入' : '支出'} - ${tx.category || '未分類'}
-                        </div>
-                        <div class="text-sm text-gray-500 truncate mt-0.5">
-                            ${tx.description}
-                        </div>
-                        <div class="text-xs text-gray-400 mt-1">
-                            ${tx.date}
-                        </div>
-                    </div>
-                    <div class="flex items-center ml-4">
-                        <span class="font-bold text-lg ${isIncome ? 'text-green-600' : 'text-red-600'}">
-                            ${isIncome ? '+' : '-'} NT$ ${formatCurrency(amount)}
-                        </span>
-                        <button data-id="${tx.id}" class="delete-btn ml-3 p-1 rounded-full hover:bg-red-50 text-gray-400 hover:text-red-600 transition">
-                            <i data-lucide="trash-2" class="w-5 h-5"></i>
-                        </button>
-                    </div>
-                `;
-     
+    if (!description || !type) {
+      this.errorMessage.set('請先輸入交易描述！');
+      return;
+    }
+    
+    this.isCategorizing.set(true);
+    this.errorMessage.set(null);
+
+    const categoriesList = type === 'expense' ? EXPENSE_CATEGORIES : INCOME_CATEGORIES;
+    const SYSTEM_PROMPT = `You are an expert financial categorizer. Your task is to analyze the transaction description (in Traditional Chinese) and type, and classify it into the most appropriate category from the list. If no category fits well, use '其他 (Other)'. The categories are: ${categoriesList.join(', ')}. Respond only with a single JSON object.`;
+
+    const userQuery = `Type: ${type === 'expense' ? '支出' : '收入'}. Description: ${description}. Please suggest the best category from the list: ${categoriesList.join(', ')}`;
+
+    const CATEGORY_SCHEMA = {
+      type: "OBJECT",
+      properties: {
+        suggestedCategory: {
+          type: "STRING",
+          description: "One of the predefined categories based on the transaction description and type."
+        }
+      },
+      required: ["suggestedCategory"]
+    };
+
+    const payload = {
+        contents: [{ parts: [{ text: userQuery }] }],
+        systemInstruction: { parts: [{ text: SYSTEM_PROMPT }] },
+        generationConfig: {
+            responseMimeType: "application/json",
+            responseSchema: CATEGORY_SCHEMA
+        }
+    };
+
+    try {
+        const response = await this.fetchWithRetry(API_URL, payload);
+        const result = await response.json();
+
+        const jsonString = result.candidates?.[0]?.content?.parts?.[0]?.text;
+        if (jsonString) {
+            const parsedJson = JSON.parse(jsonString);
+            const suggestedCategory = parsedJson.suggestedCategory;
+            
+            if (suggestedCategory && categoriesList.includes(suggestedCategory)) {
+                this.transactionForm.get('category')?.setValue(suggestedCategory);
+                this.errorMessage.set(`AI 建議分類: ${suggestedCategory}`);
+                setTimeout(() => this.errorMessage.set(null), 3000);
+            } else if (suggestedCategory) {
+                 // 即使模型輸出不在列表中，如果輸出了結果，也設為 '其他'
+                this.transactionForm.get('category')?.setValue('其他 (Other)');
+                this.errorMessage.set('AI 建議分類無效，已設為: 其他 (Other)');
+                setTimeout(() => this.errorMessage.set(null), 3000);
+            }
+        } else {
+            this.errorMessage.set('AI 分類失敗：無有效回應');
+        }
+
+    } catch (e) {
+      this.handleError("AI 分類 API 呼叫失敗", e);
+    } finally {
+      this.isCategorizing.set(false);
+    }
+  }
+
+
+  // 初始化 Firebase 應用和驗證
+  async initializeFirebaseAndAuth(): Promise<void> {
+    if (!FIREBASE_CONFIG) {
+      this.handleError("Firebase configuration is missing.", new Error("Configuration is undefined. Cannot initialize Firebase."));
+      return;
+    }
+
+    try {
+      this.app = initializeApp(FIREBASE_CONFIG);
+      this.db = get
