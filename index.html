@@ -207,7 +207,7 @@
         }
 
 
-        // --- Firebase 初始化與授權 ---
+        // --- Firebase 初始化與授權 (強化版) ---
 
         async function initFirebase() {
             try {
@@ -215,40 +215,58 @@
                 const app = initializeApp(firebaseConfig);
                 db = getFirestore(app);
                 auth = getAuth(app);
+                
+                let authSuccess = false;
 
-                // 2. 處理身份驗證
+                // 2. 嘗試 Custom Token 登入 (可能失敗，但要保持彈性)
                 if (initialAuthToken) {
-                    await signInWithCustomToken(auth, initialAuthToken);
-                } else {
-                    await signInAnonymously(auth);
-                }
-
-                // 3. 監聽身份驗證狀態變化
-                onAuthStateChanged(auth, (user) => {
-                    if (user) {
-                        currentUserId = user.uid;
-                        userIdEl.textContent = currentUserId;
-                        authStatusEl.textContent = '已連線到 Firestore';
-                        authStatusEl.className = 'text-xs text-gray-500 mt-1 font-semibold text-green-600';
-                        
-                        // 設定 Firestore 集合路徑
-                        // 使用公共路徑 /artifacts/{appId}/public/data/transactions
-                        const collectionPath = `/artifacts/${appId}/public/data/transactions`;
-                        transactionsCollectionRef = collection(db, collectionPath);
-                        
-                        startRealtimeListener(); // 身份驗證完成後開始監聽資料庫
-                    } else {
-                        // 這是匿名或未登入狀態，我們應保持在匿名登入模式
-                        userIdEl.textContent = '匿名用戶 (請刷新重試)';
-                        authStatusEl.textContent = '授權失敗';
-                        authStatusEl.className = 'text-xs text-gray-500 mt-1 font-semibold text-red-600';
-                        loadingMessageEl.textContent = '無法獲取授權，請重試。';
+                    try {
+                        await signInWithCustomToken(auth, initialAuthToken);
+                        authSuccess = true;
+                    } catch (tokenError) {
+                        // 捕捉無效 token 錯誤，並警告但繼續執行
+                        console.warn("Custom Token sign-in failed (possibly invalid/expired token), attempting anonymous sign-in.", tokenError);
                     }
-                });
+                }
+                
+                // 3. 嘗試匿名登入 (這是可靠的備用方案)
+                if (!authSuccess) {
+                    await signInAnonymously(auth);
+                    authSuccess = true;
+                }
+                
+                // 4. 只有在成功登入後才設定監聽器
+                if (authSuccess) {
+                    onAuthStateChanged(auth, (user) => {
+                        if (user) {
+                            currentUserId = user.uid;
+                            userIdEl.textContent = currentUserId;
+                            authStatusEl.textContent = '已連線到 Firestore';
+                            authStatusEl.className = 'text-xs text-gray-500 mt-1 font-semibold text-green-600';
+                            
+                            // 設定 Firestore 集合路徑
+                            // 使用公共路徑 /artifacts/{appId}/public/data/transactions
+                            const collectionPath = `/artifacts/${appId}/public/data/transactions`;
+                            transactionsCollectionRef = collection(db, collectionPath);
+                            
+                            startRealtimeListener(); // 身份驗證完成後開始監聽資料庫
+                        } else {
+                            // 應該不會走到這裡
+                            userIdEl.textContent = '登入失敗 (請刷新重試)';
+                            authStatusEl.textContent = '未授權';
+                            authStatusEl.className = 'text-xs text-gray-500 mt-1 font-semibold text-red-600';
+                            loadingMessageEl.textContent = '無法獲取授權，請重試。';
+                        }
+                    });
+                } else {
+                     // 如果 Custom Token 和匿名登入都失敗了
+                     throw new Error("Failed to sign in via both methods.");
+                }
 
             } catch (error) {
                 console.error("Firebase Initialization or Auth Failed:", error);
-                showModal('連線錯誤', `無法連線到雲端服務，錯誤訊息: ${error.message}`, false);
+                // 只有在連線或匿名登入失敗時才彈出致命錯誤
+                showModal('連線錯誤', `無法連線到雲端服務，請檢查網路。錯誤訊息: ${error.message}`, false);
                 loadingMessageEl.textContent = '連線失敗。';
             }
         }
@@ -293,6 +311,9 @@
             let totalIncome = 0;
             let totalExpense = 0;
             listEl.innerHTML = ''; // 清空列表
+            
+            // 移除載入訊息
+            loadingMessageEl.style.display = 'none';
 
             if (transactions.length === 0) {
                 listEl.innerHTML = '<p class="text-gray-500 text-center py-4">暫無交易記錄。新增一筆來開始記帳吧！</p>';
