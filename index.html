@@ -123,7 +123,6 @@
                     <!-- Category (Initially hidden, to be populated by AI) -->
                     <div class="mb-4">
                         <label class="block text-sm font-medium text-gray-700 mb-1">類別</label>
-                        <!-- Note: Removed the disabled select field, as categorization is now async/auto -->
                         <input type="text" id="category-display" disabled value="將由 AI 自動分類"
                             class="w-full p-3 border border-gray-300 rounded-lg bg-gray-100 text-gray-500 cursor-not-allowed">
                     </div>
@@ -185,14 +184,15 @@
             </div>
 
             <!-- AI Classification Tool -->
-            <div class="card bg-white p-6 rounded-xl">
-                <h2 class="text-2xl font-semibold mb-4 text-gray-800">AI 交易分類工具</h2>
-                <p class="text-sm text-gray-600 mb-4">
-                    當您新增交易時，會自動啟用 Gemini 模型對描述進行智能分類。
+            <div class="card bg-white p-6 rounded-xl mb-6">
+                <h2 class="text-2xl font-semibold mb-4 text-gray-800">資料清理與診斷</h2>
+                <p class="text-sm text-red-600 mb-4 font-bold">
+                    警告：此操作將永久刪除所有儲存在您裝置上的記帳本資料！
                 </p>
-                <div class="flex justify-center items-center h-32 text-gray-500 bg-gray-50 rounded-lg border border-dashed">
-                    目前已啟用，點擊「確認新增」即可體驗。
-                </div>
+                <button id="clear-data-btn"
+                    class="w-full py-3 bg-red-600 text-white font-semibold rounded-xl hover:bg-red-700 transition duration-150 shadow-md">
+                    <i data-lucide="alert-triangle" class="inline-block w-5 h-5 mr-2"></i> 清除所有本地資料
+                </button>
             </div>
         </div>
     </div>
@@ -274,12 +274,17 @@
             try {
                 const json = localStorage.getItem(STORAGE_KEY);
                 const transactions = json ? JSON.parse(json) : [];
-                // Sort by timestamp for consistent display (most recent first)
+                
+                // Sorting is important for display consistency
                 transactions.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
+
+                console.log('--- loadTransactions ---');
+                console.log(`Loaded ${transactions.length} transactions.`);
+
                 return transactions;
             } catch (e) {
-                console.error("Error loading from localStorage:", e);
-                showModal("載入歷史資料失敗，可能資料已損毀。", '錯誤');
+                console.error("Error loading from localStorage (Data Corrupted):", e);
+                showModal("載入歷史資料失敗，可能資料已損毀。請嘗試清除本地資料。", '資料錯誤');
                 return [];
             }
         }
@@ -291,9 +296,11 @@
         function saveTransactions(transactions) {
             try {
                 localStorage.setItem(STORAGE_KEY, JSON.stringify(transactions));
+                console.log('--- saveTransactions ---');
+                console.log(`Successfully saved ${transactions.length} transactions.`);
             } catch (e) {
-                console.error("Error saving to localStorage:", e);
-                showModal("儲存資料失敗，可能裝置儲存空間不足。", '錯誤');
+                console.error("Error saving to localStorage (Quota Exceeded or Security):", e);
+                showModal("儲存資料失敗，可能裝置儲存空間不足或瀏覽器安全限制。", '儲存錯誤');
             }
         }
 
@@ -304,18 +311,26 @@
          */
         function addTransaction(data) {
             const transactions = loadTransactions();
-            const newId = Date.now() + Math.floor(Math.random() * 1000); // More unique ID
+            const newId = Date.now() + Math.floor(Math.random() * 1000); // Unique ID
+            
+            // Log raw data before adding/parsing
+            console.log('--- addTransaction: Raw Data ---', data);
+            
             const newTx = {
                 id: newId, 
                 ...data,
                 amount: parseFloat(data.amount), // Ensure amount is stored as a number
-                timestamp: new Date().toISOString(), // Use ISO string for sorting
+                timestamp: new Date().toISOString(), 
                 date: data.date, 
                 category: data.category || '分類中...' // Placeholder category
             };
+
             transactions.push(newTx);
             saveTransactions(transactions);
-            renderTransactions(); // Re-render the whole list immediately
+            
+            // Re-render the whole list immediately
+            renderTransactions(); 
+            
             return newId;
         }
 
@@ -331,6 +346,9 @@
                 transactions[index].category = newCategory;
                 saveTransactions(transactions);
                 renderTransactions(); // Re-render to show updated category
+                console.log(`Transaction ID ${id} category updated to: ${newCategory}`);
+            } else {
+                 console.warn(`Attempted to update non-existent transaction ID: ${id}`);
             }
         }
 
@@ -346,17 +364,26 @@
             transactions = transactions.filter(tx => tx.id !== id);
             saveTransactions(transactions);
             renderTransactions();
+            showModal('交易記錄已刪除。', '完成');
         }
 
-        // --- Gemini API Classification ---
-
         /**
-         * Uses the Gemini API to classify a transaction description.
-         * @param {string} description - The transaction description.
-         * @returns {Promise<string>} - The classified category (e.g., '餐飲', '交通').
+         * Clears ALL data from localStorage for this app.
          */
+        async function clearAllLocalData() {
+            const confirmed = await showModal('您確定要清除所有本地記帳本資料嗎？此操作無法復原！', '極重要警告', true);
+            if (!confirmed) return;
+
+            localStorage.removeItem(STORAGE_KEY);
+            renderTransactions();
+            showModal('所有本地記帳本資料已成功清除。您可以重新開始新增交易。', '清除完成');
+            console.log("!!! LOCAL STORAGE CLEARED !!!");
+        }
+
+
+        // --- Gemini API Classification (Unchanged, for context) ---
+
         async function classifyTransaction(description) {
-            // If the user is running this outside the secure environment, the key will be empty.
             if (!API_KEY) {
                 console.warn("API Key is missing. Returning default category.");
                 return '未分類';
@@ -387,7 +414,6 @@
             const baseDelay = 1000;
             const validCategories = ['餐飲', '交通', '娛樂', '購物', '住房', '收入', '醫療', '教育', '其他'];
 
-
             while (attempts < maxAttempts) {
                 try {
                     const response = await fetch(apiUrl, {
@@ -397,7 +423,6 @@
                     });
 
                     if (!response.ok) {
-                         // Throw to trigger retry/error handling
                         throw new Error(`API response status: ${response.status}`);
                     }
 
@@ -412,7 +437,7 @@
                             if (classifiedCategory && validCategories.includes(classifiedCategory)) {
                                 return classifiedCategory;
                             }
-                            return '其他'; // Default if classification is invalid
+                            return '其他'; 
                         } catch (e) {
                             console.error("Failed to parse AI JSON response:", e, jsonText);
                             throw new Error("Invalid JSON response from AI.");
@@ -425,24 +450,4 @@
                     attempts++;
                     console.warn(`AI classification attempt ${attempts} failed: ${error.message}. Retrying...`);
                     if (attempts < maxAttempts) {
-                        const delay = baseDelay * Math.pow(2, attempts - 1);
-                        await new Promise(resolve => setTimeout(resolve, delay));
-                    } else {
-                        console.error("AI classification failed after multiple retries.");
-                        throw new Error("AI classification service unreachable or failed.");
-                    }
-                }
-            }
-            return '未分類'; // Should not be reached, but as a final fallback
-        }
-
-
-        // --- UI Rendering ---
-
-        /**
-         * Renders the transaction list and updates the summary.
-         */
-        function renderTransactions() {
-            const transactions = loadTransactions(); // Always load fresh data
-            const listEl = document.getElementById('transaction-list');
-            l
+                        const delay = ba
