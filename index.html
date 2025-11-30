@@ -64,10 +64,12 @@
 <body class="min-h-screen">
 
     <div class="container mx-auto">
-        <!-- Header & ID Display (REMOVED ID DISPLAY) -->
+        <!-- Header & Storage Info -->
         <header class="text-center mb-6 pt-4">
             <h1 class="text-3xl font-extrabold text-gray-900">本地記帳本</h1>
-            <p class="text-xs text-gray-500 mt-1">資料儲存在您的裝置上 (localStorage)</p>
+            <p id="storage-info" class="text-xs text-gray-500 mt-1">
+                資料儲存在您的裝置上 (<span class="font-semibold">localStorage</span>)
+            </p>
         </header>
 
         <!-- Balance Summary -->
@@ -149,7 +151,7 @@
             <div class="card bg-white p-6 rounded-xl">
                 <h2 class="text-2xl font-semibold mb-4 text-gray-800">歷史記錄</h2>
                 <div id="transaction-list" class="space-y-3">
-                    <p class="text-gray-500 text-center py-4" id="loading-message">載入中，請稍候...</p>
+                    <p class="text-gray-500 text-center py-4" id="empty-message">載入中...</p>
                 </div>
             </div>
         </div>
@@ -166,7 +168,7 @@
             <!-- Backup/Restore -->
             <div class="card bg-white p-6 rounded-xl mb-6">
                 <h2 class="text-2xl font-semibold mb-4 text-gray-800">資料備份與還原</h2>
-                <p class="text-sm text-gray-600 mb-4">您的資料儲存在本地瀏覽器，可隨時備份。</p>
+                <p class="text-sm text-gray-600 mb-4">資料儲存在您的裝置上 (<span class="font-semibold">localStorage</span>)。</p>
                 <div class="space-y-4">
                     <button id="backup-btn"
                         class="w-full py-3 bg-blue-500 text-white font-semibold rounded-xl hover:bg-blue-600 transition duration-150 shadow-md">
@@ -182,12 +184,12 @@
 
             <!-- AI Classification Tool -->
             <div class="card bg-white p-6 rounded-xl">
-                <h2 class="text-2xl font-semibold mb-4 text-gray-800">AI 交易分類工具 (未來功能)</h2>
+                <h2 class="text-2xl font-semibold mb-4 text-gray-800">AI 交易分類工具</h2>
                 <p class="text-sm text-gray-600 mb-4">
-                    使用 Gemini 模型對描述進行智能分類。
+                    當您新增交易時，會自動啟用 Gemini 模型對描述進行智能分類。
                 </p>
                 <div class="flex justify-center items-center h-32 text-gray-500 bg-gray-50 rounded-lg border border-dashed">
-                    點擊「確認新增」時，將自動啟用 AI 分類。
+                    目前已啟用，點擊「確認新增」即可體驗。
                 </div>
             </div>
         </div>
@@ -205,9 +207,8 @@
         </div>
     </div>
 
-    <script type="module">
-        // --- Configuration ---
-        const LOCAL_STORAGE_KEY = 'local_transactions_data';
+    <script>
+        const STORAGE_KEY = 'local_transactions';
         const API_KEY = ""; // Placeholder for Gemini API key
 
         // --- Utility Functions ---
@@ -259,99 +260,69 @@
         function formatCurrency(amount) {
             return new Intl.NumberFormat('zh-TW', { style: 'decimal', minimumFractionDigits: 2 }).format(amount);
         }
-        
-        // --- Local Storage Data Operations ---
+
+        // --- Local Storage Operations ---
 
         /**
-         * Loads all transactions from local storage.
-         * @returns {Array<Object>} - The list of transactions.
+         * Loads transactions from localStorage.
+         * @returns {Array<Object>}
          */
         function loadTransactions() {
             try {
-                const json = localStorage.getItem(LOCAL_STORAGE_KEY);
-                // Parse the JSON. If null, return an empty array.
-                const transactions = json ? JSON.parse(json) : [];
-                // Ensure timestamp is a Date object for correct sorting
-                return transactions.map(tx => ({
-                    ...tx,
-                    timestamp: new Date(tx.timestamp)
-                }));
+                const json = localStorage.getItem(STORAGE_KEY);
+                return json ? JSON.parse(json) : [];
             } catch (e) {
-                console.error("Error loading transactions from localStorage:", e);
+                console.error("Error loading from localStorage:", e);
+                showModal("載入歷史資料失敗，可能資料已損毀。", '錯誤');
                 return [];
             }
         }
 
         /**
-         * Saves the array of transactions to local storage.
-         * @param {Array<Object>} transactions - The list of transactions.
+         * Saves transactions to localStorage.
+         * @param {Array<Object>} transactions
          */
         function saveTransactions(transactions) {
             try {
-                // Before saving, ensure Date objects are converted to ISO strings
-                const serializableTransactions = transactions.map(tx => ({
-                    ...tx,
-                    timestamp: tx.timestamp.toISOString() // Convert Date to string
-                }));
-                localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(serializableTransactions));
-                // After saving, trigger re-render
-                renderTransactions(transactions);
+                localStorage.setItem(STORAGE_KEY, JSON.stringify(transactions));
             } catch (e) {
-                console.error("Error saving transactions to localStorage:", e);
-                showModal('資料儲存失敗，可能您的瀏覽器儲存空間不足。', '儲存錯誤');
+                console.error("Error saving to localStorage:", e);
+                showModal("儲存資料失敗，可能裝置儲存空間不足。", '錯誤');
             }
         }
 
         /**
-         * Adds a new transaction to the local storage.
-         * @param {Object} data - Transaction data (type, date, description, amount, category).
+         * Adds a new transaction.
+         * @param {Object} data - Transaction data.
          */
-        async function addTransaction(data) {
+        function addTransaction(data) {
             const transactions = loadTransactions();
-            const newTransaction = {
-                id: crypto.randomUUID(), // Use a random unique ID for deletion
+            const newTx = {
+                id: Date.now(), // Use timestamp as a simple unique ID
                 ...data,
-                amount: parseFloat(data.amount),
-                // Use a proper date object for sorting, set to current time for sorting consistency
-                timestamp: new Date(), 
+                amount: parseFloat(data.amount), // Ensure amount is stored as a number
+                timestamp: new Date().toISOString(), // Use ISO string for sorting
+                date: data.date, // Preserve original date string from form
+                category: data.category || '未分類'
             };
-            
-            transactions.push(newTransaction);
-            // Sort by timestamp (newest first) before saving
-            transactions.sort((a, b) => b.timestamp.getTime() - a.timestamp.getTime());
+            transactions.push(newTx);
+            // Sort by timestamp for consistent display (most recent first)
+            transactions.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
             saveTransactions(transactions);
-            console.log("Transaction added successfully.");
+            renderTransactions(transactions);
         }
 
         /**
-         * Deletes a transaction from local storage.
-         * @param {string} id - Transaction ID to delete.
+         * Deletes a transaction by its ID.
+         * @param {number} id - The ID of the transaction to delete.
          */
         async function deleteTransaction(id) {
             const confirmed = await showModal('確定要刪除這筆交易記錄嗎？', '確認刪除', true);
             if (!confirmed) return;
 
             let transactions = loadTransactions();
-            const initialLength = transactions.length;
-            
-            // Filter out the transaction with the matching ID
             transactions = transactions.filter(tx => tx.id !== id);
-            
-            if (transactions.length < initialLength) {
-                saveTransactions(transactions);
-                console.log("Transaction successfully deleted.");
-            } else {
-                 showModal('找不到要刪除的交易記錄。', '錯誤');
-            }
-        }
-        
-        /**
-         * Initializes the app by loading and rendering existing data.
-         */
-        function initializeApp() {
-            console.log("App initialized with Local Storage mode.");
-            // Load and render existing data immediately
-            const transactions = loadTransactions();
+            saveTransactions(transactions);
             renderTransactions(transactions);
         }
 
@@ -359,20 +330,19 @@
 
         /**
          * Uses the Gemini API to classify a transaction description.
-         * (This part is preserved but may be disabled if no API key is available)
          * @param {string} description - The transaction description.
          * @returns {Promise<string>} - The classified category (e.g., '餐飲', '交通').
          */
         async function classifyTransaction(description) {
-             if (!API_KEY) {
+            // Note: In this local version, we assume the API key is provided by the environment.
+            if (!API_KEY) {
                 console.warn("API Key is missing. Skipping AI classification.");
                 return '未分類';
             }
-            
+
             const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=${API_KEY}`;
             const systemPrompt = `你是一個專業的財務分類助手。請根據用戶提供的交易描述，將其歸類為以下其中一個類別：餐飲、交通、娛樂、購物、住房、收入、醫療、教育、其他。請直接以 JSON 格式輸出，不要包含任何額外文字或解釋。`;
 
-            // Define the structured JSON output
             const responseSchema = {
                 type: "OBJECT",
                 properties: {
@@ -403,7 +373,6 @@
                     });
 
                     if (!response.ok) {
-                         // Throw to retry if it's a transient server error (e.g., 500)
                         throw new Error(`API response status: ${response.status}`);
                     }
 
@@ -413,10 +382,15 @@
                     if (jsonText) {
                         try {
                             const parsedJson = JSON.parse(jsonText);
-                            return parsedJson.category || '未分類';
+                            // Validate and return the category
+                            const validCategories = ['餐飲', '交通', '娛樂', '購物', '住房', '收入', '醫療', '教育', '其他'];
+                            const classifiedCategory = parsedJson.category;
+                            if (classifiedCategory && validCategories.includes(classifiedCategory)) {
+                                return classifiedCategory;
+                            }
+                            return '其他'; // Default if classification is invalid
                         } catch (e) {
                             console.error("Failed to parse AI JSON response:", e, jsonText);
-                            // If parsing fails, treat it as a temporary error and retry
                             throw new Error("Invalid JSON response from AI.");
                         }
                     } else {
@@ -427,11 +401,9 @@
                     attempts++;
                     console.warn(`AI classification attempt ${attempts} failed: ${error.message}. Retrying...`);
                     if (attempts < maxAttempts) {
-                        // Exponential backoff
                         const delay = baseDelay * Math.pow(2, attempts - 1);
                         await new Promise(resolve => setTimeout(resolve, delay));
                     } else {
-                        // All attempts failed
                         console.error("AI classification failed after multiple retries.");
                         return '未分類';
                     }
@@ -445,4 +417,32 @@
 
         /**
          * Renders the transaction list and updates the summary.
-         * @param {Array<Object>} transa
+         * @param {Array<Object>} transactions
+         */
+        function renderTransactions(transactions) {
+            const listEl = document.getElementById('transaction-list');
+            listEl.innerHTML = ''; // Clear existing list
+
+            let totalIncome = 0;
+            let totalExpense = 0;
+
+            if (transactions.length === 0) {
+                listEl.innerHTML = '<p class="text-gray-500 text-center py-4">暫無交易記錄。所有資料將儲存在您的瀏覽器中。</p>';
+            } else {
+                transactions.forEach(tx => {
+                    const isIncome = tx.type === 'income';
+                    const amount = tx.amount;
+
+                    if (isIncome) {
+                        totalIncome += amount;
+                    } else {
+                        totalExpense += amount;
+                    }
+
+                    // Get display date
+                    const displayDate = tx.date || new Date(tx.timestamp).toLocaleDateString('zh-TW');
+
+                    const itemHtml = `
+                        <div class="transaction-item card flex justify-between items-center p-4 rounded-xl shadow-sm ${isIncome ? 'income-border' : 'expense-border'} bg-white">
+                            <div class="flex-1 min-w-0">
+                                <div class="font-semibold text-lg text-gray-
