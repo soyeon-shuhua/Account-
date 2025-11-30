@@ -59,6 +59,9 @@
             opacity: 1;
             color: #dc2626;
         }
+        .category-pending {
+            color: #f97316; /* Orange 500 */
+        }
     </style>
 </head>
 <body class="min-h-screen">
@@ -120,10 +123,9 @@
                     <!-- Category (Initially hidden, to be populated by AI) -->
                     <div class="mb-4">
                         <label class="block text-sm font-medium text-gray-700 mb-1">類別</label>
-                        <select id="category" name="category"
-                            class="w-full p-2 border border-gray-300 rounded-lg bg-gray-100 text-gray-500 cursor-not-allowed" disabled>
-                            <option value="">(將由 AI 自動分類)</option>
-                        </select>
+                        <!-- Note: Removed the disabled select field, as categorization is now async/auto -->
+                        <input type="text" id="category-display" disabled value="將由 AI 自動分類"
+                            class="w-full p-3 border border-gray-300 rounded-lg bg-gray-100 text-gray-500 cursor-not-allowed">
                     </div>
 
                     <!-- Description -->
@@ -140,7 +142,7 @@
                             class="w-full p-3 border border-gray-300 rounded-lg focus:ring-orange-500 focus:border-orange-500">
                     </div>
 
-                    <button type="submit"
+                    <button type="submit" id="submit-btn"
                         class="w-full py-3 bg-orange-600 text-white font-semibold rounded-xl hover:bg-orange-700 transition duration-150 shadow-lg shadow-orange-200">
                         確認新增
                     </button>
@@ -151,7 +153,7 @@
             <div class="card bg-white p-6 rounded-xl">
                 <h2 class="text-2xl font-semibold mb-4 text-gray-800">歷史記錄</h2>
                 <div id="transaction-list" class="space-y-3">
-                    <p class="text-gray-500 text-center py-4" id="empty-message">載入中...</p>
+                    <!-- Content populated by JS -->
                 </div>
             </div>
         </div>
@@ -209,7 +211,8 @@
 
     <script>
         const STORAGE_KEY = 'local_transactions';
-        const API_KEY = ""; // Placeholder for Gemini API key
+        // Note: API Key is expected to be provided by the environment, left empty for local testing.
+        const API_KEY = ""; 
 
         // --- Utility Functions ---
 
@@ -228,7 +231,7 @@
             const cancelBtn = document.getElementById('modal-cancel');
 
             modal.classList.remove('hidden', 'flex');
-            modal.classList.add('flex'); // Ensure modal is visible
+            modal.classList.add('flex');
 
             if (isConfirm) {
                 cancelBtn.classList.remove('hidden');
@@ -270,7 +273,10 @@
         function loadTransactions() {
             try {
                 const json = localStorage.getItem(STORAGE_KEY);
-                return json ? JSON.parse(json) : [];
+                const transactions = json ? JSON.parse(json) : [];
+                // Sort by timestamp for consistent display (most recent first)
+                transactions.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
+                return transactions;
             } catch (e) {
                 console.error("Error loading from localStorage:", e);
                 showModal("載入歷史資料失敗，可能資料已損毀。", '錯誤');
@@ -292,24 +298,40 @@
         }
 
         /**
-         * Adds a new transaction.
+         * Adds a new transaction and returns its ID.
          * @param {Object} data - Transaction data.
+         * @returns {number} The new transaction ID.
          */
         function addTransaction(data) {
             const transactions = loadTransactions();
+            const newId = Date.now() + Math.floor(Math.random() * 1000); // More unique ID
             const newTx = {
-                id: Date.now(), // Use timestamp as a simple unique ID
+                id: newId, 
                 ...data,
                 amount: parseFloat(data.amount), // Ensure amount is stored as a number
                 timestamp: new Date().toISOString(), // Use ISO string for sorting
-                date: data.date, // Preserve original date string from form
-                category: data.category || '未分類'
+                date: data.date, 
+                category: data.category || '分類中...' // Placeholder category
             };
             transactions.push(newTx);
-            // Sort by timestamp for consistent display (most recent first)
-            transactions.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
             saveTransactions(transactions);
-            renderTransactions(transactions);
+            renderTransactions(); // Re-render the whole list immediately
+            return newId;
+        }
+
+        /**
+         * Updates a transaction's category by ID.
+         * @param {number} id - The ID of the transaction to update.
+         * @param {string} newCategory - The new category string.
+         */
+        function updateTransactionCategory(id, newCategory) {
+            let transactions = loadTransactions();
+            const index = transactions.findIndex(tx => tx.id === id);
+            if (index !== -1) {
+                transactions[index].category = newCategory;
+                saveTransactions(transactions);
+                renderTransactions(); // Re-render to show updated category
+            }
         }
 
         /**
@@ -323,7 +345,7 @@
             let transactions = loadTransactions();
             transactions = transactions.filter(tx => tx.id !== id);
             saveTransactions(transactions);
-            renderTransactions(transactions);
+            renderTransactions();
         }
 
         // --- Gemini API Classification ---
@@ -334,9 +356,9 @@
          * @returns {Promise<string>} - The classified category (e.g., '餐飲', '交通').
          */
         async function classifyTransaction(description) {
-            // Note: In this local version, we assume the API key is provided by the environment.
+            // If the user is running this outside the secure environment, the key will be empty.
             if (!API_KEY) {
-                console.warn("API Key is missing. Skipping AI classification.");
+                console.warn("API Key is missing. Returning default category.");
                 return '未分類';
             }
 
@@ -363,6 +385,8 @@
             let attempts = 0;
             const maxAttempts = 3;
             const baseDelay = 1000;
+            const validCategories = ['餐飲', '交通', '娛樂', '購物', '住房', '收入', '醫療', '教育', '其他'];
+
 
             while (attempts < maxAttempts) {
                 try {
@@ -373,6 +397,7 @@
                     });
 
                     if (!response.ok) {
+                         // Throw to trigger retry/error handling
                         throw new Error(`API response status: ${response.status}`);
                     }
 
@@ -382,9 +407,8 @@
                     if (jsonText) {
                         try {
                             const parsedJson = JSON.parse(jsonText);
-                            // Validate and return the category
-                            const validCategories = ['餐飲', '交通', '娛樂', '購物', '住房', '收入', '醫療', '教育', '其他'];
                             const classifiedCategory = parsedJson.category;
+                            
                             if (classifiedCategory && validCategories.includes(classifiedCategory)) {
                                 return classifiedCategory;
                             }
@@ -405,11 +429,11 @@
                         await new Promise(resolve => setTimeout(resolve, delay));
                     } else {
                         console.error("AI classification failed after multiple retries.");
-                        return '未分類';
+                        throw new Error("AI classification service unreachable or failed.");
                     }
                 }
             }
-            return '未分類';
+            return '未分類'; // Should not be reached, but as a final fallback
         }
 
 
@@ -417,32 +441,8 @@
 
         /**
          * Renders the transaction list and updates the summary.
-         * @param {Array<Object>} transactions
          */
-        function renderTransactions(transactions) {
+        function renderTransactions() {
+            const transactions = loadTransactions(); // Always load fresh data
             const listEl = document.getElementById('transaction-list');
-            listEl.innerHTML = ''; // Clear existing list
-
-            let totalIncome = 0;
-            let totalExpense = 0;
-
-            if (transactions.length === 0) {
-                listEl.innerHTML = '<p class="text-gray-500 text-center py-4">暫無交易記錄。所有資料將儲存在您的瀏覽器中。</p>';
-            } else {
-                transactions.forEach(tx => {
-                    const isIncome = tx.type === 'income';
-                    const amount = tx.amount;
-
-                    if (isIncome) {
-                        totalIncome += amount;
-                    } else {
-                        totalExpense += amount;
-                    }
-
-                    // Get display date
-                    const displayDate = tx.date || new Date(tx.timestamp).toLocaleDateString('zh-TW');
-
-                    const itemHtml = `
-                        <div class="transaction-item card flex justify-between items-center p-4 rounded-xl shadow-sm ${isIncome ? 'income-border' : 'expense-border'} bg-white">
-                            <div class="flex-1 min-w-0">
-                                <div class="font-semibold text-lg text-gray-
+            l
