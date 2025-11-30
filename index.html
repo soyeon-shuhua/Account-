@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>雲端記帳本 - 交易記錄與分類</title>
+    <title>本地記帳本 - 交易記錄與分類</title>
     <!-- Tailwind CSS CDN -->
     <script src="https://cdn.tailwindcss.com"></script>
     <!-- Lucide Icons -->
@@ -64,13 +64,10 @@
 <body class="min-h-screen">
 
     <div class="container mx-auto">
-        <!-- Header & ID Display -->
+        <!-- Header & ID Display (REMOVED ID DISPLAY) -->
         <header class="text-center mb-6 pt-4">
-            <h1 class="text-3xl font-extrabold text-gray-900">雲端記帳本</h1>
-            <!-- THIS IS THE CRITICAL ID DISPLAY -->
-            <p id="user-id-display" class="text-xs text-gray-500 mt-1">
-                ID: 連線中...
-            </p>
+            <h1 class="text-3xl font-extrabold text-gray-900">本地記帳本</h1>
+            <p class="text-xs text-gray-500 mt-1">資料儲存在您的裝置上 (localStorage)</p>
         </header>
 
         <!-- Balance Summary -->
@@ -152,7 +149,7 @@
             <div class="card bg-white p-6 rounded-xl">
                 <h2 class="text-2xl font-semibold mb-4 text-gray-800">歷史記錄</h2>
                 <div id="transaction-list" class="space-y-3">
-                    <p class="text-gray-500 text-center py-4" id="loading-message">連線中，請稍候...</p>
+                    <p class="text-gray-500 text-center py-4" id="loading-message">載入中，請稍候...</p>
                 </div>
             </div>
         </div>
@@ -169,7 +166,7 @@
             <!-- Backup/Restore -->
             <div class="card bg-white p-6 rounded-xl mb-6">
                 <h2 class="text-2xl font-semibold mb-4 text-gray-800">資料備份與還原</h2>
-                <p class="text-sm text-gray-600 mb-4">您的資料已安全儲存在 Firestore 雲端資料庫中。</p>
+                <p class="text-sm text-gray-600 mb-4">您的資料儲存在本地瀏覽器，可隨時備份。</p>
                 <div class="space-y-4">
                     <button id="backup-btn"
                         class="w-full py-3 bg-blue-500 text-white font-semibold rounded-xl hover:bg-blue-600 transition duration-150 shadow-md">
@@ -209,15 +206,8 @@
     </div>
 
     <script type="module">
-        // Firebase Imports
-        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
-        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
-        import { getFirestore, doc, addDoc, setDoc, deleteDoc, onSnapshot, collection, query, orderBy, serverTimestamp, setLogLevel } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
-
-        // Global Firebase variables (will be initialized later)
-        let app, db, auth;
-        let userId = 'loading...';
-        const APP_ID = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+        // --- Configuration ---
+        const LOCAL_STORAGE_KEY = 'local_transactions_data';
         const API_KEY = ""; // Placeholder for Gemini API key
 
         // --- Utility Functions ---
@@ -235,6 +225,9 @@
             document.getElementById('modal-message').textContent = message;
             const confirmBtn = document.getElementById('modal-confirm');
             const cancelBtn = document.getElementById('modal-cancel');
+
+            modal.classList.remove('hidden', 'flex');
+            modal.classList.add('flex'); // Ensure modal is visible
 
             if (isConfirm) {
                 cancelBtn.classList.remove('hidden');
@@ -255,7 +248,6 @@
                 confirmBtn.onclick = () => {
                     modal.classList.add('hidden');
                 };
-                modal.classList.remove('hidden');
             }
         }
 
@@ -267,169 +259,190 @@
         function formatCurrency(amount) {
             return new Intl.NumberFormat('zh-TW', { style: 'decimal', minimumFractionDigits: 2 }).format(amount);
         }
-
-        // --- Firebase Initialization and Authentication ---
+        
+        // --- Local Storage Data Operations ---
 
         /**
-         * Initializes Firebase and authenticates the user.
+         * Loads all transactions from local storage.
+         * @returns {Array<Object>} - The list of transactions.
          */
-        async function initializeFirebase() {
-            setLogLevel('Debug'); // Enable Firebase logging
-            const userIdDisplay = document.getElementById('user-id-display');
-
+        function loadTransactions() {
             try {
-                // 1. Initialize App
-                const firebaseConfigString = typeof __firebase_config !== 'undefined' ? __firebase_config : '{}';
-                const firebaseConfig = JSON.parse(firebaseConfigString);
-
-                if (Object.keys(firebaseConfig).length === 0 || !firebaseConfig.projectId) {
-                    throw new Error("Firebase 設定遺失或無效。");
-                }
-                app = initializeApp(firebaseConfig);
-                db = getFirestore(app);
-                auth = getAuth(app);
-                console.log("Firebase App & Firestore initialized.");
-
-
-                // 2. Authentication
-                const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
-
-                const authPromise = new Promise((resolve) => {
-                    // Set up an auth state listener
-                    const unsubscribe = onAuthStateChanged(auth, async (user) => {
-                        if (user) {
-                            userId = user.uid;
-                            userIdDisplay.textContent = `ID: ${userId}`;
-                            console.log(`User authenticated. UID: ${userId}`);
-                            unsubscribe(); // Stop listening after successful auth
-                            resolve(true);
-                        } else {
-                            // If user is null (no previous session), try signing in
-                            try {
-                                if (initialAuthToken) {
-                                    await signInWithCustomToken(auth, initialAuthToken);
-                                } else {
-                                    await signInAnonymously(auth);
-                                }
-                                // onAuthStateChanged will handle the rest upon successful sign-in
-                            } catch (error) {
-                                console.error("Firebase Sign-in Error:", error);
-                                userIdDisplay.textContent = `ID: 登入失敗 ❌`;
-                                showModal(`Firebase 登入失敗: ${error.message}`, '錯誤');
-                                resolve(false); // Authentication failed
-                            }
-                        }
-                    });
-                });
-
-                await authPromise; // Wait for authentication to complete
-
-            } catch (error) {
-                console.error("Firebase Initialization Error:", error);
-                userIdDisplay.textContent = `ID: 錯誤，請檢查 Console ❌`;
-                document.getElementById('loading-message').textContent = '❌ 連線失敗，請檢查 Console 錯誤訊息！';
-                showModal(`Firebase 初始化失敗: ${error.message}`, '嚴重錯誤');
-            }
-
-            // Start listening for data ONLY after auth is attempted/completed
-            if (db && userId && userId !== 'loading...' && !userId.includes('失敗') && !userId.includes('錯誤')) {
-                setupRealtimeListener();
+                const json = localStorage.getItem(LOCAL_STORAGE_KEY);
+                // Parse the JSON. If null, return an empty array.
+                const transactions = json ? JSON.parse(json) : [];
+                // Ensure timestamp is a Date object for correct sorting
+                return transactions.map(tx => ({
+                    ...tx,
+                    timestamp: new Date(tx.timestamp)
+                }));
+            } catch (e) {
+                console.error("Error loading transactions from localStorage:", e);
+                return [];
             }
         }
 
-        // --- Firestore Data Operations ---
-
         /**
-         * Gets the Firestore collection path for the current user.
-         * Using /artifacts/{appId}/users/{userId}/transactions
-         * @returns {string}
+         * Saves the array of transactions to local storage.
+         * @param {Array<Object>} transactions - The list of transactions.
          */
-        function getTransactionCollectionPath() {
-            return `artifacts/${APP_ID}/users/${userId}/transactions`;
-        }
-
-        /**
-         * Sets up the real-time listener for transactions.
-         */
-        function setupRealtimeListener() {
-            if (!db || !userId) {
-                console.warn("Database or User ID not ready for listener.");
-                return;
-            }
-
-            const transactionsColRef = collection(db, getTransactionCollectionPath());
-            const q = query(transactionsColRef); // No orderBy to avoid index issues
-
-            console.log(`Listening to path: ${getTransactionCollectionPath()}`);
-
-            const unsubscribe = onSnapshot(q, (snapshot) => {
-                const transactions = [];
-                snapshot.forEach((doc) => {
-                    // Ensure serverTimestamp is parsed or handled safely
-                    const data = doc.data();
-                    transactions.push({
-                        id: doc.id,
-                        ...data,
-                        timestamp: data.timestamp ? data.timestamp.toDate() : new Date(), // Convert Timestamp to Date
-                    });
-                });
-
-                // Sort transactions by timestamp manually (descending)
-                transactions.sort((a, b) => b.timestamp.getTime() - a.timestamp.getTime());
-
+        function saveTransactions(transactions) {
+            try {
+                // Before saving, ensure Date objects are converted to ISO strings
+                const serializableTransactions = transactions.map(tx => ({
+                    ...tx,
+                    timestamp: tx.timestamp.toISOString() // Convert Date to string
+                }));
+                localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(serializableTransactions));
+                // After saving, trigger re-render
                 renderTransactions(transactions);
-            }, (error) => {
-                console.error("Firestore Snapshot Listener Error:", error);
-                document.getElementById('loading-message').textContent = `❌ 資料庫連線錯誤: ${error.message}`;
-                showModal(`資料同步失敗，請檢查連線。錯誤詳情已輸出至 Console。`, '資料錯誤');
-            });
-
-            // Note: In a full app, you might want to store this unsubscribe function
-            // to call it when the user logs out or the component unmounts.
+            } catch (e) {
+                console.error("Error saving transactions to localStorage:", e);
+                showModal('資料儲存失敗，可能您的瀏覽器儲存空間不足。', '儲存錯誤');
+            }
         }
 
         /**
-         * Adds a new transaction to Firestore.
-         * @param {Object} data - Transaction data.
+         * Adds a new transaction to the local storage.
+         * @param {Object} data - Transaction data (type, date, description, amount, category).
          */
         async function addTransaction(data) {
-            if (!db || !userId) {
-                showModal('使用者未登入或連線失敗，無法新增交易。', '錯誤');
-                return;
-            }
-            try {
-                const docRef = await addDoc(collection(db, getTransactionCollectionPath()), {
-                    ...data,
-                    amount: parseFloat(data.amount), // Ensure amount is stored as a number
-                    timestamp: serverTimestamp(), // Use Firestore's server timestamp
-                    category: data.category || '未分類', // Default category if AI classification fails
-                });
-                console.log("Document written with ID: ", docRef.id);
-            } catch (e) {
-                console.error("Error adding document: ", e);
-                showModal(`新增交易失敗: ${e.message}`, '錯誤');
-            }
+            const transactions = loadTransactions();
+            const newTransaction = {
+                id: crypto.randomUUID(), // Use a random unique ID for deletion
+                ...data,
+                amount: parseFloat(data.amount),
+                // Use a proper date object for sorting, set to current time for sorting consistency
+                timestamp: new Date(), 
+            };
+            
+            transactions.push(newTransaction);
+            // Sort by timestamp (newest first) before saving
+            transactions.sort((a, b) => b.timestamp.getTime() - a.timestamp.getTime());
+            saveTransactions(transactions);
+            console.log("Transaction added successfully.");
         }
 
         /**
-         * Deletes a transaction from Firestore.
-         * @param {string} id - Document ID to delete.
+         * Deletes a transaction from local storage.
+         * @param {string} id - Transaction ID to delete.
          */
         async function deleteTransaction(id) {
-            if (!db || !userId) {
-                showModal('使用者未登入或連線失敗，無法刪除交易。', '錯誤');
-                return;
-            }
             const confirmed = await showModal('確定要刪除這筆交易記錄嗎？', '確認刪除', true);
             if (!confirmed) return;
 
-            try {
-                await deleteDoc(doc(db, getTransactionCollectionPath(), id));
-                console.log("Document successfully deleted.");
-            } catch (e) {
-                console.error("Error deleting document: ", e);
-                showModal(`刪除交易失敗: ${e.message}`, '錯誤');
+            let transactions = loadTransactions();
+            const initialLength = transactions.length;
+            
+            // Filter out the transaction with the matching ID
+            transactions = transactions.filter(tx => tx.id !== id);
+            
+            if (transactions.length < initialLength) {
+                saveTransactions(transactions);
+                console.log("Transaction successfully deleted.");
+            } else {
+                 showModal('找不到要刪除的交易記錄。', '錯誤');
             }
         }
+        
+        /**
+         * Initializes the app by loading and rendering existing data.
+         */
+        function initializeApp() {
+            console.log("App initialized with Local Storage mode.");
+            // Load and render existing data immediately
+            const transactions = loadTransactions();
+            renderTransactions(transactions);
+        }
 
-        // --- Gemini API Classificati
+        // --- Gemini API Classification ---
+
+        /**
+         * Uses the Gemini API to classify a transaction description.
+         * (This part is preserved but may be disabled if no API key is available)
+         * @param {string} description - The transaction description.
+         * @returns {Promise<string>} - The classified category (e.g., '餐飲', '交通').
+         */
+        async function classifyTransaction(description) {
+             if (!API_KEY) {
+                console.warn("API Key is missing. Skipping AI classification.");
+                return '未分類';
+            }
+            
+            const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=${API_KEY}`;
+            const systemPrompt = `你是一個專業的財務分類助手。請根據用戶提供的交易描述，將其歸類為以下其中一個類別：餐飲、交通、娛樂、購物、住房、收入、醫療、教育、其他。請直接以 JSON 格式輸出，不要包含任何額外文字或解釋。`;
+
+            // Define the structured JSON output
+            const responseSchema = {
+                type: "OBJECT",
+                properties: {
+                    "category": { "type": "STRING", "description": "分類結果，必須是 '餐飲', '交通', '娛樂', '購物', '住房', '收入', '醫療', '教育', '其他' 之一。" }
+                },
+                required: ["category"]
+            };
+
+            const payload = {
+                contents: [{ parts: [{ text: `請將以下交易描述分類: "${description}"` }] }],
+                systemInstruction: { parts: [{ text: systemPrompt }] },
+                generationConfig: {
+                    responseMimeType: "application/json",
+                    responseSchema: responseSchema
+                }
+            };
+
+            let attempts = 0;
+            const maxAttempts = 3;
+            const baseDelay = 1000;
+
+            while (attempts < maxAttempts) {
+                try {
+                    const response = await fetch(apiUrl, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(payload)
+                    });
+
+                    if (!response.ok) {
+                         // Throw to retry if it's a transient server error (e.g., 500)
+                        throw new Error(`API response status: ${response.status}`);
+                    }
+
+                    const result = await response.json();
+                    const jsonText = result.candidates?.[0]?.content?.parts?.[0]?.text;
+
+                    if (jsonText) {
+                        try {
+                            const parsedJson = JSON.parse(jsonText);
+                            return parsedJson.category || '未分類';
+                        } catch (e) {
+                            console.error("Failed to parse AI JSON response:", e, jsonText);
+                            // If parsing fails, treat it as a temporary error and retry
+                            throw new Error("Invalid JSON response from AI.");
+                        }
+                    } else {
+                        throw new Error("AI response was empty.");
+                    }
+
+                } catch (error) {
+                    attempts++;
+                    console.warn(`AI classification attempt ${attempts} failed: ${error.message}. Retrying...`);
+                    if (attempts < maxAttempts) {
+                        // Exponential backoff
+                        const delay = baseDelay * Math.pow(2, attempts - 1);
+                        await new Promise(resolve => setTimeout(resolve, delay));
+                    } else {
+                        // All attempts failed
+                        console.error("AI classification failed after multiple retries.");
+                        return '未分類';
+                    }
+                }
+            }
+            return '未分類';
+        }
+
+
+        // --- UI Rendering ---
+
+        /**
+         * Renders the transaction list and updates the summary.
+         * @param {Array<Object>} transa
