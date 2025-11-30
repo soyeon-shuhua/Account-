@@ -259,15 +259,22 @@
         }
 
 
-        // --- Firebase 初始化與授權 (修正配置與 Token 錯誤) ---
+        // --- Firebase 初始化與授權 (強化連線穩定性) ---
 
         async function initFirebase() {
             try {
-                // 1. 獲取並嚴格驗證配置
-                const firebaseConfig = typeof __firebase_config === 'string' ? JSON.parse(__firebase_config) : {};
+                // 1. 獲取並嚴格驗證配置，避免 JSON.parse 錯誤
+                const configString = typeof __firebase_config === 'string' ? __firebase_config : '{}';
+                const firebaseConfig = JSON.parse(configString);
                 
+                // 檢查是否有必要的配置資訊 (例如 projectId)
                 if (!firebaseConfig.projectId) {
-                    throw new Error(`配置缺失，無法連線。錯誤代碼: "projectId" not provided.`);
+                    // 如果配置缺失，則優雅地顯示錯誤訊息並停止雲端連線流程
+                    authStatusEl.textContent = '配置錯誤，無法連線雲端功能';
+                    authStatusEl.className = 'text-xs text-gray-500 mt-1 font-semibold text-red-600';
+                    userIdEl.textContent = '雲端功能不可用';
+                    loadingMessageEl.textContent = '無法連線到雲端資料庫。請檢查環境配置。';
+                    throw new Error("Firebase configuration missing or invalid. Cloud features disabled.");
                 }
                 
                 // 2. 初始化 App 和服務
@@ -287,7 +294,7 @@
                     }
                 }
                 
-                // 4. 嘗試匿名登入
+                // 4. 嘗試匿名登入 (作為備用)
                 if (!authSuccess) {
                     await signInAnonymously(auth);
                     authSuccess = true;
@@ -319,9 +326,12 @@
                 }
 
             } catch (error) {
-                console.error("Firebase Initialization or Auth Failed:", error);
-                showModal('連線錯誤', `無法連線到雲端服務，請檢查網路或嘗試刷新。錯誤訊息: ${error.message}`, false);
-                loadingMessageEl.textContent = '連線失敗。';
+                // 如果是手動拋出的 "Cloud features disabled" 錯誤，則不需要彈窗，狀態欄已更新
+                if (!error.message.includes("Cloud features disabled")) {
+                    console.error("Firebase Initialization or Auth Failed:", error);
+                    showModal('連線錯誤', `無法連線到雲端服務，請檢查網路或嘗試刷新。錯誤訊息: ${error.message}`, false);
+                    loadingMessageEl.textContent = '連線失敗，請檢查配置。';
+                }
             }
         }
 
@@ -407,26 +417,4 @@
                         </button>
                     </div>
                 `;
-                listEl.appendChild(item);
-            });
-            
-            // 重新渲染 Lucide 圖標
-            if (typeof lucide !== 'undefined') {
-                lucide.createIcons();
-            }
-            
-            // 重新綁定刪除事件
-            document.querySelectorAll('.delete-btn').forEach(button => {
-                button.addEventListener('click', (e) => deleteTransaction(e.currentTarget.dataset.id));
-            });
-        }
-        
-        // --- 圖表分析與匯出/匯入功能 ---
-        
-        /**
-         * 計算總結算並渲染分析圖表。
-         */
-        function calculateAndRenderAnalytics(transactions) {
-            let totalIncome = 0;
-            let totalExpense = 0;
-    
+     
