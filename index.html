@@ -8,6 +8,8 @@
     <script src="https://cdn.tailwindcss.com"></script>
     <!-- 載入 Lucide Icons -->
     <script src="https://unpkg.com/lucide@latest"></script>
+    <!-- 載入 Chart.js 用於圖表分析 -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
     <style>
         /* 使用 Inter 字體 */
         body { font-family: 'Inter', sans-serif; background-color: #f7f7f7; }
@@ -63,11 +65,26 @@
                     </div>
                 </div>
 
-                <!-- Description -->
-                <div class="mb-4">
-                    <label class="block text-sm font-medium text-gray-700 mb-1">描述</label>
-                    <input type="text" id="description" name="description" placeholder="例如：午餐, 加班費" required
-                        class="w-full p-3 border border-gray-300 rounded-lg focus:ring-orange-500 focus:border-orange-500">
+                <!-- Category and Description -->
+                <div class="grid grid-cols-1 gap-4 mb-4">
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700 mb-1">類別</label>
+                        <select id="category" name="category"
+                            class="w-full p-2 border border-gray-300 rounded-lg focus:ring-orange-500 focus:border-orange-500">
+                            <option value="餐飲">餐飲</option>
+                            <option value="交通">交通</option>
+                            <option value="生活用品">生活用品</option>
+                            <option value="娛樂">娛樂</option>
+                            <option value="薪資">薪資 (收入)</option>
+                            <option value="投資">投資 (收入/支出)</option>
+                            <option value="其他">其他</option>
+                        </select>
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700 mb-1">描述</label>
+                        <input type="text" id="description" name="description" placeholder="例如：午餐, 加班費" required
+                            class="w-full p-3 border border-gray-300 rounded-lg focus:ring-orange-500 focus:border-orange-500">
+                    </div>
                 </div>
 
                 <!-- Amount -->
@@ -84,6 +101,38 @@
             </form>
         </div>
 
+        <!-- Analysis and Export/Import Section -->
+        <div class="bg-white p-6 rounded-xl shadow-lg mb-6">
+            <h2 class="text-2xl font-semibold mb-4 text-gray-800">圖表分析與資料傳輸</h2>
+
+            <!-- Export and Import Buttons -->
+            <div class="grid grid-cols-2 gap-3">
+                <!-- Export Button -->
+                <button id="export-csv-btn"
+                    class="py-2 bg-blue-600 text-white font-semibold rounded-xl hover:bg-blue-700 transition duration-150 shadow-lg shadow-blue-200 disabled:opacity-50">
+                    <i data-lucide="file-text" class="w-5 h-5 inline mr-1 align-text-top"></i> 匯出 CSV
+                </button>
+
+                <!-- Import Button and Hidden Input -->
+                <div class="relative">
+                    <input type="file" id="import-file-input" accept=".csv" class="hidden">
+                    <button id="import-csv-btn"
+                        class="w-full py-2 bg-purple-600 text-white font-semibold rounded-xl hover:bg-purple-700 transition duration-150 shadow-lg shadow-purple-200 disabled:opacity-50">
+                        <i data-lucide="upload" class="w-5 h-5 inline mr-1 align-text-top"></i> 匯入 CSV
+                    </button>
+                </div>
+            </div>
+
+            <!-- Chart -->
+            <div class="mt-6 pt-4 border-t border-gray-100">
+                <h3 class="text-xl font-medium mb-3 text-gray-700">支出類別分佈</h3>
+                <div class="relative h-64 w-full">
+                    <canvas id="expense-chart"></canvas>
+                </div>
+                <p id="chart-status" class="text-center text-sm text-gray-500 mt-2">無足夠數據進行分析。</p>
+            </div>
+        </div>
+        
         <!-- Transaction List -->
         <div class="bg-white p-6 rounded-xl shadow-lg">
             <h2 class="text-2xl font-semibold mb-4 text-gray-800">歷史記錄 (來自 Firestore)</h2>
@@ -96,7 +145,7 @@
             </div>
         </div>
 
-        <!-- Custom Alert Modal (for non-alert() environment) -->
+        <!-- Custom Alert Modal -->
         <div id="custom-modal" class="fixed inset-0 bg-gray-600 bg-opacity-50 hidden items-center justify-center p-4 z-50">
             <div class="bg-white p-6 rounded-lg shadow-xl w-full max-w-sm">
                 <h3 id="modal-title" class="text-xl font-bold mb-4 text-red-600"></h3>
@@ -134,10 +183,11 @@
         let auth;
         let currentUserId = null;
         let transactionsCollectionRef = null;
+        let expenseChartInstance = null; 
+        window.allTransactions = []; 
 
         // 獲取執行環境提供的全域變數
         const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
-        const firebaseConfig = typeof __firebase_config === 'string' ? JSON.parse(__firebase_config) : {};
         const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
 
         // HTML 元素
@@ -147,6 +197,12 @@
         const formEl = document.getElementById('transaction-form');
         const submitBtn = document.getElementById('submit-btn');
         const loadingMessageEl = document.getElementById('loading-message');
+        const exportCsvBtn = document.getElementById('export-csv-btn');
+        const importCsvBtn = document.getElementById('import-csv-btn');
+        const importFileInput = document.getElementById('import-file-input');
+        const chartStatusEl = document.getElementById('chart-status');
+        const chartCanvas = document.getElementById('expense-chart');
+
 
         // --- 輔助函數 ---
 
@@ -163,10 +219,6 @@
 
         /**
          * 自訂模態框取代 window.confirm/alert
-         * @param {string} title - 標題
-         * @param {string} message - 內容訊息
-         * @param {boolean} isConfirm - 是否為確認模式 (顯示取消按鈕)
-         * @returns {Promise<boolean>} - 如果是確認模式，返回 Promise<boolean>
          */
         function showModal(title, message, isConfirm = false) {
             const modalEl = document.getElementById('custom-modal');
@@ -207,35 +259,41 @@
         }
 
 
-        // --- Firebase 初始化與授權 (強化版) ---
+        // --- Firebase 初始化與授權 (修正配置與 Token 錯誤) ---
 
         async function initFirebase() {
             try {
-                // 1. 初始化 App 和服務
+                // 1. 獲取並嚴格驗證配置
+                const firebaseConfig = typeof __firebase_config === 'string' ? JSON.parse(__firebase_config) : {};
+                
+                if (!firebaseConfig.projectId) {
+                    throw new Error(`配置缺失，無法連線。錯誤代碼: "projectId" not provided.`);
+                }
+                
+                // 2. 初始化 App 和服務
                 const app = initializeApp(firebaseConfig);
                 db = getFirestore(app);
                 auth = getAuth(app);
                 
                 let authSuccess = false;
 
-                // 2. 嘗試 Custom Token 登入 (可能失敗，但要保持彈性)
+                // 3. 嘗試 Custom Token 登入
                 if (initialAuthToken) {
                     try {
                         await signInWithCustomToken(auth, initialAuthToken);
                         authSuccess = true;
                     } catch (tokenError) {
-                        // 捕捉無效 token 錯誤，並警告但繼續執行
                         console.warn("Custom Token sign-in failed (possibly invalid/expired token), attempting anonymous sign-in.", tokenError);
                     }
                 }
                 
-                // 3. 嘗試匿名登入 (這是可靠的備用方案)
+                // 4. 嘗試匿名登入
                 if (!authSuccess) {
                     await signInAnonymously(auth);
                     authSuccess = true;
                 }
                 
-                // 4. 只有在成功登入後才設定監聽器
+                // 5. 只有在成功登入後才設定監聽器
                 if (authSuccess) {
                     onAuthStateChanged(auth, (user) => {
                         if (user) {
@@ -244,14 +302,12 @@
                             authStatusEl.textContent = '已連線到 Firestore';
                             authStatusEl.className = 'text-xs text-gray-500 mt-1 font-semibold text-green-600';
                             
-                            // 設定 Firestore 集合路徑
-                            // 使用公共路徑 /artifacts/{appId}/public/data/transactions
+                            // 設定 Firestore 集合路徑 (公共路徑)
                             const collectionPath = `/artifacts/${appId}/public/data/transactions`;
                             transactionsCollectionRef = collection(db, collectionPath);
                             
                             startRealtimeListener(); // 身份驗證完成後開始監聽資料庫
                         } else {
-                            // 應該不會走到這裡
                             userIdEl.textContent = '登入失敗 (請刷新重試)';
                             authStatusEl.textContent = '未授權';
                             authStatusEl.className = 'text-xs text-gray-500 mt-1 font-semibold text-red-600';
@@ -259,14 +315,12 @@
                         }
                     });
                 } else {
-                     // 如果 Custom Token 和匿名登入都失敗了
-                     throw new Error("Failed to sign in via both methods.");
+                     throw new Error("無法連線: Custom Token 和匿名登入都失敗。");
                 }
 
             } catch (error) {
                 console.error("Firebase Initialization or Auth Failed:", error);
-                // 只有在連線或匿名登入失敗時才彈出致命錯誤
-                showModal('連線錯誤', `無法連線到雲端服務，請檢查網路。錯誤訊息: ${error.message}`, false);
+                showModal('連線錯誤', `無法連線到雲端服務，請檢查網路或嘗試刷新。錯誤訊息: ${error.message}`, false);
                 loadingMessageEl.textContent = '連線失敗。';
             }
         }
@@ -296,7 +350,9 @@
                     return timeB - timeA;
                 });
                 
+                window.allTransactions = transactions; // 儲存數據供匯出使用
                 renderTransactions(transactions);
+                calculateAndRenderAnalytics(transactions); // 同時渲染分析圖表
             }, (error) => {
                 console.error("Firestore Snapshot Error:", error);
                 loadingMessageEl.textContent = '載入資料失敗。';
@@ -305,21 +361,16 @@
 
         /**
          * 渲染交易列表和總結算。
-         * @param {Array<Object>} transactions 交易記錄陣列
          */
         function renderTransactions(transactions) {
             let totalIncome = 0;
             let totalExpense = 0;
             listEl.innerHTML = ''; // 清空列表
             
-            // 移除載入訊息
             loadingMessageEl.style.display = 'none';
 
             if (transactions.length === 0) {
                 listEl.innerHTML = '<p class="text-gray-500 text-center py-4">暫無交易記錄。新增一筆來開始記帳吧！</p>';
-                document.getElementById('total-income').textContent = formatCurrency(0);
-                document.getElementById('total-expense').textContent = formatCurrency(0);
-                document.getElementById('net-balance').textContent = formatCurrency(0);
                 return;
             }
 
@@ -358,12 +409,7 @@
                 `;
                 listEl.appendChild(item);
             });
-
-            // 更新總結算
-            document.getElementById('total-income').textContent = formatCurrency(totalIncome);
-            document.getElementById('total-expense').textContent = formatCurrency(totalExpense);
-            document.getElementById('net-balance').textContent = formatCurrency(totalIncome - totalExpense);
-
+            
             // 重新渲染 Lucide 圖標
             if (typeof lucide !== 'undefined') {
                 lucide.createIcons();
@@ -374,83 +420,13 @@
                 button.addEventListener('click', (e) => deleteTransaction(e.currentTarget.dataset.id));
             });
         }
-
-        // --- CRUD 邏輯 ---
-
-        /**
-         * 新增交易記錄。
-         */
-        formEl.addEventListener('submit', async (e) => {
-            e.preventDefault();
-            
-            if (!transactionsCollectionRef) {
-                showModal('錯誤', '資料庫尚未連線，請稍候再試。', false);
-                return;
-            }
-
-            // 禁用按鈕並顯示儲存中
-            submitBtn.disabled = true;
-            submitBtn.textContent = '儲存中...';
-
-            const formData = new FormData(formEl);
-            const newTxData = {
-                type: formData.get('type'),
-                date: formData.get('date'),
-                description: formData.get('description'),
-                amount: parseFloat(formData.get('amount')),
-                category: '一般', // 預設類別
-                userId: currentUserId,
-                timestamp: serverTimestamp() // 確保使用伺服器時間戳
-            };
-
-            try {
-                await addDoc(transactionsCollectionRef, newTxData);
-                console.log("Transaction added successfully.");
-                
-                // 重置表單
-                formEl.reset();
-                // 設置日期為今天
-                document.getElementById('date').value = new Date().toISOString().substring(0, 10);
-
-            } catch (error) {
-                console.error("Error adding document: ", error);
-                showModal('新增失敗', `無法將資料儲存到雲端，錯誤訊息: ${error.message}`, false);
-            } finally {
-                // 啟用按鈕
-                submitBtn.disabled = false;
-                submitBtn.textContent = '確認新增到雲端';
-            }
-        });
-
-        /**
-         * 刪除交易記錄。
-         * @param {string} id - 文件 ID
-         */
-        async function deleteTransaction(id) {
-            const confirmed = await showModal('確認刪除', '您確定要永久刪除這筆交易記錄嗎？', true);
-            
-            if (!confirmed || !transactionsCollectionRef) return;
-
-            try {
-                const docRef = doc(db, transactionsCollectionRef.path, id);
-                await deleteDoc(docRef);
-                console.log("Transaction deleted:", id);
-                // onSnapshot 會自動更新 UI
-            } catch (error) {
-                console.error("Error deleting document:", error);
-                showModal('刪除失敗', `無法刪除交易，錯誤訊息: ${error.message}`, false);
-            }
-        }
-
-
-        // --- 初始化 ---
         
-        // 設置表單的預設日期為今天
-        document.getElementById('date').value = new Date().toISOString().substring(0, 10);
+        // --- 圖表分析與匯出/匯入功能 ---
         
-        // 開始 Firebase 流程
-        initFirebase();
-    </script>
-</body>
-</html>
-
+        /**
+         * 計算總結算並渲染分析圖表。
+         */
+        function calculateAndRenderAnalytics(transactions) {
+            let totalIncome = 0;
+            let totalExpense = 0;
+    
